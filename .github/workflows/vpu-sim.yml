@@ -31,11 +31,18 @@ jobs:
           autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
       - name: Deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3
-      - name: Checkout PRIVATE repo (token never echoed; source never leaves the runner)
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
         run: |
-          git clone --quiet --depth 1 --branch hp-vpu-pipe-verif \
-            "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>/dev/null \
-            && echo "private checkout ok (details suppressed)"
+          set +e
+          git clone --depth 1 --branch hp-vpu-pipe-verif \
+            "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "checkout FAILED rc=$rc. git error (auth/branch only, no RTL content):"
+            sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt
+            exit 1
+          fi
+          echo "private checkout ok (details suppressed)"
       - name: Run sim — TERSE verdict only (no source, no grid, no logs in the public output)
         run: |
           export PATH=/opt/verilator/bin:$PATH
