@@ -43,7 +43,7 @@ jobs:
             exit 1
           fi
           echo "private checkout ok (details suppressed)"
-      - name: Run sim — TERSE verdict only (no source, no grid, no logs in the public output)
+      - name: Run sim — heartbeat + TERSE verdict (no source, no grid in the public log)
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd src; set +e
@@ -52,7 +52,11 @@ jobs:
             regress) C="env SKU=DLEN256 HARNESS=corr_vpu3_diff.SEW64REF.cpp SEW64_REGRESS=1 bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
             topdiff) C="env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.cpp bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
           esac
-          bash -lc "$C" > /tmp/sim.log 2>&1; rc=$?
-          echo "=== verdict ==="; grep -hE 'MATRIX:|regression:.*->|RESULT:|CLEAN|works=|=> (ALL )?PASS|FAIL' /tmp/sim.log | tail -6 || echo "(no verdict line)"
+          bash -lc "$C" > /tmp/sim.log 2>&1 &
+          PID=$!; t=0
+          while kill -0 $PID 2>/dev/null; do sleep 30; t=$((t+30)); echo "...sim alive ${t}s"; done
+          wait $PID; rc=$?
+          echo "=== verdict ==="
+          grep -hE 'MATRIX:|regression:.*->|RESULT:|CLEAN|works=|=> (ALL )?PASS|FAIL' /tmp/sim.log | tail -6 || echo "(no verdict line)"
           [ $rc -eq 0 ] || echo "::warning::sim rc=$rc (full log withheld to avoid source disclosure)"
-      # NO artifact upload — nothing from the private tree is published.
+      # NO artifact upload.
