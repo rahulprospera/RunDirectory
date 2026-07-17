@@ -1,26 +1,26 @@
 name: vpu-sim
-# PUBLIC runner-shell. Holds ONLY this workflow — NO RTL, ever. It clones the PRIVATE repo at
-# runtime via the RTL_REPO_TOKEN secret; the source lives only on the ephemeral GitHub runner
-# (destroyed after the job) and is NEVER committed here or uploaded as an artifact.
+# PUBLIC runner-shell. NO RTL committed here. Clones the PRIVATE repo at runtime via RTL_REPO_TOKEN.
+# BUILD-ONCE / RUN-MANY: Verilator (tool) cached, DUT binary cached keyed on RTL hash. Runs are then
+# fast SEED-varied bursts against the cached DUT — short, observable, no rebuild-every-time waste.
 on:
-  workflow_dispatch:            # OWNER-MANUAL ONLY. No push/pull_request => a fork PR can never see the secret.
+  workflow_dispatch:
     inputs:
-      sim: { description: 'matrix | regress | topdiff', default: 'matrix' }
-      k:   { description: 'MATRIX_K corner depth', default: '64' }
-      sku: { description: 'SKU', default: 'DLEN64' }
-permissions:
-  contents: read
-concurrency: { group: vpu-sim, cancel-in-progress: true }
+      sim:    { description: 'matrix (only build-once path for now)', default: 'matrix' }
+      k:      { description: 'random vectors/cell per burst (MATRIX_K)', default: '16' }
+      bursts: { description: 'number of seeded bursts vs the cached DUT', default: '3' }
+      sku:    { description: 'SKU', default: 'DLEN64' }
+permissions: { contents: read }
+concurrency: { group: vpu-sim, cancel-in-progress: false }
 jobs:
   sim:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
     steps:
-      - name: Cache Verilator
+      - name: Cache Verilator (tool)
         id: vc
         uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
-      - name: Build Verilator (cache miss only)
+      - name: Build Verilator (miss only)
         if: steps.vc.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
@@ -36,27 +36,28 @@ jobs:
           set +e
           git clone --depth 1 --branch hp-vpu-pipe-verif \
             "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
-          rc=$?
-          if [ $rc -ne 0 ]; then
-            echo "checkout FAILED rc=$rc. git error (auth/branch only, no RTL content):"
-            sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt
-            exit 1
-          fi
-          echo "private checkout ok (details suppressed)"
-      - name: Run sim — heartbeat + TERSE verdict (no source, no grid in the public log)
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - name: Cache built DUT (keyed on RTL hash — BUILD ONCE)
+        id: dut
+        uses: actions/cache@v4
+        with:
+          path: src/dut_bin
+          key: dut-${{ inputs.sku }}-${{ hashFiles('src/rtl/engines/hp_vpu_3_0/**','src/generated/**','src/systemc/hp_vpu_3_0/**','src/verilator/corr_vpu3_diff.SEW64REF.cpp','src/scripts/hp_vpu_3_0/build_top_v15_gentle.sh') }}
+      - name: Build DUT (cache miss only) — heartbeat
+        if: steps.dut.outputs.cache-hit != 'true'
         run: |
-          export PATH=/opt/verilator/bin:$PATH
-          cd src; set +e
-          case "${{ inputs.sim }}" in
-            matrix)  C="env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.SEW64REF.cpp MATRIX=1 MATRIX_K=${{ inputs.k }} bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
-            regress) C="env SKU=DLEN256 HARNESS=corr_vpu3_diff.SEW64REF.cpp SEW64_REGRESS=1 bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
-            topdiff) C="env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.cpp bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
-          esac
-          bash -lc "$C" > /tmp/sim.log 2>&1 &
-          PID=$!; t=0
-          while kill -0 $PID 2>/dev/null; do sleep 30; t=$((t+30)); echo "...sim alive ${t}s"; done
-          wait $PID; rc=$?
-          echo "=== verdict ==="
-          grep -hE 'MATRIX:|regression:.*->|RESULT:|CLEAN|works=|=> (ALL )?PASS|FAIL' /tmp/sim.log | tail -6 || echo "(no verdict line)"
-          [ $rc -eq 0 ] || echo "::warning::sim rc=$rc (full log withheld to avoid source disclosure)"
+          export PATH=/opt/verilator/bin:$PATH; cd src; set +e
+          env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.SEW64REF.cpp MATRIX=1 MATRIX_K=1 TOP_OBJ="$PWD/objdut" \
+            bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/build.log 2>&1 &
+          PID=$!; t=0; while kill -0 $PID 2>/dev/null; do sleep 30; t=$((t+30)); echo "...building DUT ${t}s"; done; wait $PID
+          test -x objdut/Vhp_vpu_top || { echo "::error::DUT build failed"; tail -5 /tmp/build.log; exit 1; }
+          mkdir -p dut_bin && cp objdut/Vhp_vpu_top dut_bin/ && echo "DUT built + cached"
+      - name: Run SEEDED bursts vs cached DUT (fast, controlled count)
+        run: |
+          cd src; B=${{ inputs.bursts }}; K=${{ inputs.k }}
+          test -x dut_bin/Vhp_vpu_top || { echo "::error::no cached DUT"; exit 1; }
+          for i in $(seq 1 $B); do
+            env MATRIX=1 MATRIX_K=$K SEED=$i ./dut_bin/Vhp_vpu_top > /tmp/b$i.log 2>&1
+            echo "burst $i/$B (K=$K seed=$i): $(grep -hE 'MATRIX:' /tmp/b$i.log | tail -1)"
+          done
       # NO artifact upload.
