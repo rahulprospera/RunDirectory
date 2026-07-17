@@ -1,0 +1,51 @@
+name: vpu-sim
+# PUBLIC runner-shell. Holds ONLY this workflow — NO RTL, ever. It clones the PRIVATE repo at
+# runtime via the RTL_REPO_TOKEN secret; the source lives only on the ephemeral GitHub runner
+# (destroyed after the job) and is NEVER committed here or uploaded as an artifact.
+on:
+  workflow_dispatch:            # OWNER-MANUAL ONLY. No push/pull_request => a fork PR can never see the secret.
+    inputs:
+      sim: { description: 'matrix | regress | topdiff', default: 'matrix' }
+      k:   { description: 'MATRIX_K corner depth', default: '64' }
+      sku: { description: 'SKU', default: 'DLEN64' }
+permissions:
+  contents: read
+concurrency: { group: vpu-sim, cancel-in-progress: true }
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Cache Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (cache miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3
+      - name: Checkout PRIVATE repo (token never echoed; source never leaves the runner)
+        run: |
+          git clone --quiet --depth 1 --branch hp-vpu-pipe-verif \
+            "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>/dev/null \
+            && echo "private checkout ok (details suppressed)"
+      - name: Run sim — TERSE verdict only (no source, no grid, no logs in the public output)
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src; set +e
+          case "${{ inputs.sim }}" in
+            matrix)  C="env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.SEW64REF.cpp MATRIX=1 MATRIX_K=${{ inputs.k }} bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
+            regress) C="env SKU=DLEN256 HARNESS=corr_vpu3_diff.SEW64REF.cpp SEW64_REGRESS=1 bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
+            topdiff) C="env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.cpp bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh" ;;
+          esac
+          bash -lc "$C" > /tmp/sim.log 2>&1; rc=$?
+          echo "=== verdict ==="; grep -hE 'MATRIX:|regression:.*->|RESULT:|CLEAN|works=|=> (ALL )?PASS|FAIL' /tmp/sim.log | tail -6 || echo "(no verdict line)"
+          [ $rc -eq 0 ] || echo "::warning::sim rc=$rc (full log withheld to avoid source disclosure)"
+      # NO artifact upload — nothing from the private tree is published.
