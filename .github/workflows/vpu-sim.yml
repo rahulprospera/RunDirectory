@@ -5,7 +5,7 @@ name: vpu-sim
 on:
   workflow_dispatch:
     inputs:
-      sim:    { description: 'matrix (only build-once path for now)', default: 'matrix' }
+      sim:    { description: 'leaf (tiny) | matrix', default: 'leaf' }
       k:      { description: 'random vectors/cell per burst (MATRIX_K)', default: '16' }
       bursts: { description: 'number of seeded bursts vs the cached DUT', default: '3' }
       sku:    { description: 'SKU', default: 'DLEN64' }
@@ -37,14 +37,27 @@ jobs:
           git clone --depth 1 --branch hp-vpu-pipe-verif \
             "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - name: Leaf checks (TINY builds — verilator --binary per unit; cloud's job)
+        if: inputs.sim == 'leaf'
+        run: |
+          export PATH=/opt/verilator/bin:$PATH; cd src; D=rtl/engines/hp_vpu_3_0
+          for T in alu_arith alu_shift alu_satshift alu_adc alu_ext alu_narrow mask mac_unit alu_avg; do
+            if verilator --binary --build-jobs 4 -O1 --timing -Wno-fatal -Wno-lint -Wno-WIDTH \
+                 --Mdir /tmp/lf_$T +incdir+$D/deps +incdir+generated -y $D \
+                 generated/hp_vpu_3_0_config_pkg.sv $D/deps/hp_vpu_pkg.sv $D/hp_vpu_pp_add.sv $D/hp_vpu_red_pair.sv \
+                 verilator/leafval/tb_$T.sv --top-module tb_$T >/tmp/l.log 2>&1; then
+              echo "tb_$T: $(/tmp/lf_$T/Vtb_$T 2>&1 | grep -iE 'LEAF_EQUIV|RESULT:|ALL PASS|: (PASS|FAIL)' | tail -1)"
+            else echo "tb_$T: BUILD-FAIL"; fi
+          done
       - name: Cache built DUT (keyed on RTL hash — BUILD ONCE)
+        if: inputs.sim == 'matrix'
         id: dut
         uses: actions/cache@v4
         with:
           path: src/dut_bin
           key: dut-${{ inputs.sku }}-${{ hashFiles('src/rtl/engines/hp_vpu_3_0/**','src/generated/**','src/systemc/hp_vpu_3_0/**','src/verilator/corr_vpu3_diff.SEW64REF.cpp','src/scripts/hp_vpu_3_0/build_top_v15_gentle.sh') }}
       - name: Build DUT (cache miss only) — heartbeat
-        if: steps.dut.outputs.cache-hit != 'true'
+        if: inputs.sim == 'matrix' && steps.dut.outputs.cache-hit != 'true'
         run: |
           export PATH=/opt/verilator/bin:$PATH; cd src; set +e
           env SKU=${{ inputs.sku }} HARNESS=corr_vpu3_diff.SEW64REF.cpp MATRIX=1 MATRIX_K=1 TOP_OBJ="$PWD/objdut" \
@@ -53,6 +66,7 @@ jobs:
           test -x objdut/Vhp_vpu_top || { echo "::error::DUT build failed"; tail -5 /tmp/build.log; exit 1; }
           mkdir -p dut_bin && cp objdut/Vhp_vpu_top dut_bin/ && echo "DUT built + cached"
       - name: Run SEEDED bursts vs cached DUT (fast, controlled count)
+        if: inputs.sim == 'matrix'
         run: |
           cd src; B=${{ inputs.bursts }}; K=${{ inputs.k }}
           test -x dut_bin/Vhp_vpu_top || { echo "::error::no cached DUT"; exit 1; }
