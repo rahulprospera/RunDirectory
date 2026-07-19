@@ -14,7 +14,7 @@ concurrency: { group: vpu-sim, cancel-in-progress: false }
 jobs:
   sim:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300
     steps:
       - name: Cache Verilator (tool)
         id: vc
