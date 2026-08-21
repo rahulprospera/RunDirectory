@@ -1,6 +1,6 @@
 name: edgemx
 # PUBLIC runner-shell. NO RTL, NO source committed here — the private repo is cloned at runtime with
-# RTL_REPO_TOKEN (masked; clone errors scrubbed). Runs the edgemx flow on real RTL and compares it to
+# RTL_RUN_TOKEN1 (masked; clone errors scrubbed). Runs the edgemx flow on real RTL and compares it to
 # the runtime byte-for-byte.
 #
 # DISCLOSURE SURFACE — this log is world-readable. What reaches it, and nothing more:
@@ -35,9 +35,9 @@ jobs:
       - name: Check the private-repo tunnel is alive
         run: |
           set +e
-          git ls-remote "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
           if [ $? -ne 0 ]; then
-            echo "::error title=RTL_REPO_TOKEN is dead::The private-repo token is expired, revoked, or lacks Contents:Read on hp_vpu_ml_accelerator. Mint a fine-grained PAT (that repo only, Contents Read-only) and: gh secret set RTL_REPO_TOKEN --repo rahulprospera/RunDirectory"
+            echo "::error title=RTL_RUN_TOKEN1 is dead::The private-repo token is expired, revoked, or lacks Contents:Read on hp_vpu_ml_accelerator. Mint a fine-grained PAT (that repo only, Contents Read-only) and: gh secret set RTL_RUN_TOKEN1 --repo rahulprospera/RunDirectory"
             sed -E 's#(https://)[^@]*@#\1***@#g' tok_err.txt | head -2
             exit 1
           fi
@@ -65,7 +65,7 @@ jobs:
         run: |
           set +e
           git clone --depth 1 --branch "${{ inputs.branch }}" \
-            "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
       - name: Cache built executor (keyed on the RTL hash — BUILD ONCE, RUN MANY)
         id: dut

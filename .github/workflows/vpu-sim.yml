@@ -1,5 +1,5 @@
 name: vpu-sim
-# PUBLIC runner-shell. NO RTL committed here. Clones the PRIVATE repo at runtime via RTL_REPO_TOKEN.
+# PUBLIC runner-shell. NO RTL committed here. Clones the PRIVATE repo at runtime via RTL_RUN_TOKEN1.
 # BUILD-ONCE / RUN-MANY: Verilator (tool) cached, DUT binary cached keyed on RTL hash. Runs are then
 # fast SEED-varied bursts against the cached DUT — short, observable, no rebuild-every-time waste.
 on:
@@ -35,7 +35,7 @@ jobs:
         run: |
           set +e
           git clone --depth 1 --branch hp-vpu-pipe-verif \
-            "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
       - name: Leaf checks (TINY builds — verilator --binary per unit; cloud's job)
         if: inputs.sim == 'leaf'
