@@ -11,6 +11,11 @@ name: edgemx
 # module name), any RTL source, weights, or internal signal names. Build output is captured to a
 # file and filtered through an ALLOWLIST, never a blacklist.
 on:
+  schedule:
+    - cron: '17 6 * * 1,4'      # Mon/Thu: touch the caches so they are never evicted.
+                                # GitHub drops a cache unused for 7 days; losing the Verilator
+                                # cache costs a ~40 min source build and can blow the job budget.
+                                # This costs seconds.
   workflow_dispatch:
     inputs:
       branch: { description: 'private branch to run', default: 'edgemx-runtime' }
@@ -37,28 +42,49 @@ jobs:
           git checkout v5.048 || git checkout stable
           autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
       - name: Deps
+        if: github.event_name != 'schedule'
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3 python3-pip
           pip3 install --quiet numpy scikit-learn
       - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        if: github.event_name != 'schedule'
         run: |
           set +e
           git clone --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - name: Cache built executor (keyed on the RTL hash — BUILD ONCE, RUN MANY)
+        id: dut
+        if: github.event_name != 'schedule'
+        uses: actions/cache@v4
+        with:
+          path: src/dut_bin
+          key: emx-dut-${{ inputs.sku }}-${{ hashFiles('src/rtl/engines/hp_vpu_3_0/**', 'src/generated/**', 'src/verilator/tb_edgemx_exec.cpp', 'src/scripts/hp_vpu_3_0/build_top_v15_gentle.sh') }}
       - name: Runner capability (measure, do not assume)
+        if: github.event_name != 'schedule'
         run: |
           echo "cores=$(nproc)  mem=$(free -g | awk '/^Mem:/{print $2}')GB  disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
       - name: Run the flow on RTL  (ALL output captured, NONE echoed)
+        if: github.event_name != 'schedule'
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd src
           set +e
+          if [ -x dut_bin/Vhp_vpu_top ]; then
+            echo "executor: cache hit — no rebuild"
+            mkdir -p /tmp/vb/emx_${{ inputs.sku }}
+            cp -r dut_bin/* /tmp/vb/emx_${{ inputs.sku }}/
+            export TOP_OBJ=/tmp/vb/emx_${{ inputs.sku }} EMX_SKIP_BUILD=1
+          fi
           SKU="${{ inputs.sku }}" EMX_NTEST="${{ inputs.ntest }}" EMX_QUIET=1 \
             bash scripts/hp_vpu_3_0/edgemx_rtl_check.sh > /tmp/emx.log 2>&1
           echo "exit=$?" > /tmp/emx.rc
+          # stash the built executor for the next run
+          if [ -x "/tmp/vb/emx_${{ inputs.sku }}/Vhp_vpu_top" ]; then
+            mkdir -p dut_bin && cp -r /tmp/vb/emx_${{ inputs.sku }}/* dut_bin/ 2>/dev/null || true
+          fi
       - name: Verdict — ALLOWLIST ONLY (nothing else reaches this public log)
-        if: always()
+        if: always() && github.event_name != 'schedule'
         run: |
           # Whitelist, not blacklist. Build output carries the verilator command line, i.e. every
           # RTL path and module name — it must never be echoed here.
