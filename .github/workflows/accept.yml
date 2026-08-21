@@ -25,7 +25,9 @@ jobs:
           - { id: raster,    sku: DLEN256_GPU_FAB, harness: tb_flag_top.cpp,        env: 'NF=4' }
           - { id: macwide,   sku: DLEN256_GPU_FAB, harness: corr_vpu3_macwide.cpp,  env: '' }
           - { id: dual,      sku: DLEN256_GPU_FAB, harness: corr_vpu3_dual.cpp,     env: '' }
-          - { id: collision, sku: DLEN256_GPU_FAB, harness: corr_vpu3_dual.cpp,     env: 'PROVOKE=1' }
+          # PROVOKE deliberately disables the interlock so the arbiter assertion FIRES and aborts.
+          # A non-zero exit is the PASS condition here — scoring it as failure inverts the test.
+          - { id: collision, sku: DLEN256_GPU_FAB, harness: corr_vpu3_dual.cpp,     env: 'PROVOKE=1', expect_abort: 'yes' }
           - { id: fabric,    sku: MACW16_N1,       harness: corr_vpu3_macwide.cpp,  env: '' }
     name: ${{ matrix.c.id }}
     steps:
@@ -85,7 +87,13 @@ jobs:
         run: |
           grep -oE "(ALL PASS|PASS|FAIL)|pass=[0-9]+ fail=[0-9]+|[0-9]+ unique colours|ser_count=[0-9]+|COLLISION" /tmp/run.log | sort | uniq -c | head -12 || echo "no verdict"
           cat /tmp/run.rc
-          grep -q "exit=0" /tmp/run.rc || exit 1
+          if [ "${{ matrix.c.expect_abort }}" = "yes" ]; then
+            # pass == the assertion fired and aborted
+            grep -q "Aborting" /tmp/run.log && echo "EXPECTED-ABORT: collision assertion fired = PASS" \
+              || { echo "::error::assertion did NOT fire under PROVOKE — it is vacuous"; exit 1; }
+          else
+            grep -q "exit=0" /tmp/run.rc || exit 1
+          fi
       - name: Triage (RTL-shaped lines stripped)
         if: failure() && steps.g.outputs.run == 'yes'
         run: |
