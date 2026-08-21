@@ -1,0 +1,78 @@
+name: edgemx
+# PUBLIC runner-shell. NO RTL, NO source committed here — the private repo is cloned at runtime with
+# RTL_REPO_TOKEN (masked; clone errors scrubbed). Runs the edgemx flow on real RTL and compares it to
+# the runtime byte-for-byte.
+#
+# DISCLOSURE SURFACE — this log is world-readable. What reaches it, and nothing more:
+#   · runner capability (cores/mem/disk)
+#   · byte-exact PASS/FAIL count, cycle count, jitter spread, accuracy on a public dataset
+#   · on failure: a mismatch COUNT and a build-failed marker
+# Explicitly NOT echoed: the build log (it carries the verilator command line = every RTL path and
+# module name), any RTL source, weights, or internal signal names. Build output is captured to a
+# file and filtered through an ALLOWLIST, never a blacklist.
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'private branch to run', default: 'edgemx-runtime' }
+      sku:    { description: 'SKU', default: 'MACW16_N1' }
+      ntest:  { description: 'held-out samples to execute on RTL', default: '25' }
+permissions: { contents: read }
+concurrency: { group: edgemx, cancel-in-progress: false }
+jobs:
+  flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Cache Verilator (tool)
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3 python3-pip
+          pip3 install --quiet numpy scikit-learn
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - name: Runner capability (measure, do not assume)
+        run: |
+          echo "cores=$(nproc)  mem=$(free -g | awk '/^Mem:/{print $2}')GB  disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
+      - name: Run the flow on RTL  (ALL output captured, NONE echoed)
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src
+          set +e
+          SKU="${{ inputs.sku }}" EMX_NTEST="${{ inputs.ntest }}" EMX_QUIET=1 \
+            bash scripts/hp_vpu_3_0/edgemx_rtl_check.sh > /tmp/emx.log 2>&1
+          echo "exit=$?" > /tmp/emx.rc
+      - name: Verdict — ALLOWLIST ONLY (nothing else reaches this public log)
+        if: always()
+        run: |
+          # Whitelist, not blacklist. Build output carries the verilator command line, i.e. every
+          # RTL path and module name — it must never be echoed here.
+          grep -E "^   byte-exact model-vs-RTL|^   cycles +modelled|^   jitter|^   accuracy" /tmp/emx.log || echo "no verdict line produced"
+          cat /tmp/emx.rc
+      - name: Failure triage (still allowlisted)
+        if: failure()
+        run: |
+          grep -cE "MISMATCH" /tmp/emx.log | sed 's/^/mismatch lines: /' || true
+          grep -E "^::error|executor did not build|out of range" /tmp/emx.log | head -3 || true
+      - name: Stash result privately
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edgemx-rtl-check
+          path: /tmp/vb/edgemx_rtl_check.json
+          if-no-files-found: ignore
