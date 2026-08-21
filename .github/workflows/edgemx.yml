@@ -104,11 +104,20 @@ jobs:
           # RTL path and module name — it must never be echoed here.
           grep -E "^   byte-exact model-vs-RTL|^   cycles +modelled|^   jitter|^   accuracy" /tmp/emx.log || echo "no verdict line produced"
           cat /tmp/emx.rc
-      - name: Failure triage (still allowlisted)
+          # propagate the real outcome so the triage step below actually runs on failure
+          grep -q "exit=0" /tmp/emx.rc || exit 1
+      - name: Failure triage (allowlisted; RTL-shaped lines stripped)
         if: failure()
         run: |
+          echo "--- last 12 lines, filtered ---"
+          # Drop anything that names RTL: .sv files, module/signal prefixes, verilator command lines.
+          tail -25 /tmp/emx.log \
+            | grep -viE '\.sv\b|hp_vpu_[a-z_]+|verilator |mm_wgt|mm_act|ke_rs|host_rd|\+incdir|--Mdir' \
+            | tail -12
+          echo "--- markers ---"
           grep -cE "MISMATCH" /tmp/emx.log | sed 's/^/mismatch lines: /' || true
-          grep -E "^::error|executor did not build|out of range" /tmp/emx.log | head -3 || true
+          grep -oE "(ModuleNotFoundError|ImportError|FileNotFoundError|RuntimeError|ValueError|AssertionError): [^/]{0,80}" /tmp/emx.log | head -3 || true
+          grep -oE "executor did not build|out of range|cannot open job|expected [0-9]+ results" /tmp/emx.log | head -3 || true
       - name: Stash result privately
         if: always()
         uses: actions/upload-artifact@v4
