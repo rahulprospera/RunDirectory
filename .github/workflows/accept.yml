@@ -1,0 +1,92 @@
+name: accept
+# PUBLIC runner-shell. NO RTL, NO source here — private repo cloned at runtime with RTL_RUN_TOKEN1.
+# Independently re-runs the GPU+fabric acceptance the RTL author reported, on the combined SKU.
+#
+# DISCLOSURE: this log is world-readable. Only PASS/FAIL markers and counts reach it. Build output
+# is captured to a file and never echoed (it carries the verilator command line = every RTL path and
+# module name). NO rendered frames are uploaded — those are the demo's marketing assets and are not
+# ours to publish here.
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'private branch', default: 'edgemx-runtime' }
+      cell:   { description: 'raster | macwide | dual | collision | fabric | all', default: 'all' }
+permissions: { contents: read }
+concurrency: { group: accept, cancel-in-progress: false }
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        c:
+          - { id: raster,    sku: DLEN256_GPU_FAB, harness: tb_flag_top.cpp,        env: 'NF=4' }
+          - { id: macwide,   sku: DLEN256_GPU_FAB, harness: corr_vpu3_macwide.cpp,  env: '' }
+          - { id: dual,      sku: DLEN256_GPU_FAB, harness: corr_vpu3_dual.cpp,     env: '' }
+          - { id: collision, sku: DLEN256_GPU_FAB, harness: corr_vpu3_dual.cpp,     env: 'PROVOKE=1' }
+          - { id: fabric,    sku: MACW16_N1,       harness: corr_vpu3_macwide.cpp,  env: '' }
+    name: ${{ matrix.c.id }}
+    steps:
+      - name: Gate
+        id: g
+        run: |
+          w='${{ inputs.cell }}'; [ -z "$w" ] && w=all
+          [ "$w" = "all" ] || [ "$w" = "${{ matrix.c.id }}" ] && echo "run=yes" >> $GITHUB_OUTPUT || echo "run=no" >> $GITHUB_OUTPUT
+      - name: Tunnel alive?
+        if: steps.g.outputs.run == 'yes'
+        run: |
+          set +e
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>e.txt
+          [ $? -eq 0 ] || { echo "::error title=RTL_RUN_TOKEN1 is dead::mint a fine-grained PAT (hp_vpu_ml_accelerator, Contents Read-only)"; sed -E 's#(https://)[^@]*@#\1***@#g' e.txt|head -2; exit 1; }
+          echo "tunnel ok"
+      - name: Verilator (cached)
+        if: steps.g.outputs.run == 'yes'
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.g.outputs.run == 'yes' && steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        if: steps.g.outputs.run == 'yes'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache
+      - name: Checkout PRIVATE (token masked)
+        if: steps.g.outputs.run == 'yes'
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>ce.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' ce.txt; exit 1; }
+      - name: ccache
+        if: steps.g.outputs.run == 'yes'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-acc-${{ matrix.c.id }}-${{ github.sha }}
+          restore-keys: ccache-acc-${{ matrix.c.id }}-
+      - name: Run  (output captured, NOT echoed)
+        if: steps.g.outputs.run == 'yes'
+        run: |
+          export PATH=/opt/verilator/bin:$PATH; cd src
+          set +e
+          env ${{ matrix.c.env }} SKU=${{ matrix.c.sku }} HARNESS=${{ matrix.c.harness }} \
+            BUILD_JOBS=3 TOP_OBJ=/tmp/vb/acc_${{ matrix.c.id }} \
+            bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/run.log 2>&1
+          echo "exit=$?" > /tmp/run.rc
+      - name: Verdict — ALLOWLIST ONLY
+        if: always() && steps.g.outputs.run == 'yes'
+        run: |
+          grep -oE "(ALL PASS|PASS|FAIL)|pass=[0-9]+ fail=[0-9]+|[0-9]+ unique colours|ser_count=[0-9]+|COLLISION" /tmp/run.log | sort | uniq -c | head -12 || echo "no verdict"
+          cat /tmp/run.rc
+          grep -q "exit=0" /tmp/run.rc || exit 1
+      - name: Triage (RTL-shaped lines stripped)
+        if: failure() && steps.g.outputs.run == 'yes'
+        run: |
+          tail -30 /tmp/run.log | grep -viE '\.sv\b|hp_vpu_[a-z_]+|verilator |\+incdir|--Mdir|mm_wgt|mm_act|ke_rs|host_rd' | tail -10
