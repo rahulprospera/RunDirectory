@@ -28,6 +28,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
+      # ── TOKEN CANARY ───────────────────────────────────────────────────────────
+      # The tunnel died 16 Aug and nobody noticed for a month, because a dead token looks
+      # identical to an idle repo. This runs on every dispatch AND on the Mon/Thu cron, so an
+      # expired token surfaces within 3 days instead of 30. Nothing secret is printed.
+      - name: Check the private-repo tunnel is alive
+        run: |
+          set +e
+          git ls-remote "https://x-access-token:${{ secrets.RTL_REPO_TOKEN }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
+          if [ $? -ne 0 ]; then
+            echo "::error title=RTL_REPO_TOKEN is dead::The private-repo token is expired, revoked, or lacks Contents:Read on hp_vpu_ml_accelerator. Mint a fine-grained PAT (that repo only, Contents Read-only) and: gh secret set RTL_REPO_TOKEN --repo rahulprospera/RunDirectory"
+            sed -E 's#(https://)[^@]*@#\1***@#g' tok_err.txt | head -2
+            exit 1
+          fi
+          echo "tunnel ok"
       - name: Cache Verilator (tool)
         id: vc
         uses: actions/cache@v4
