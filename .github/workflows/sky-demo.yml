@@ -1,44 +1,51 @@
 name: sky-demo
 # PUBLIC runner-shell. No RTL or source lives here; the private repo is cloned at runtime with
-# RTL_RUN_TOKEN1 (masked, clone errors scrubbed). Renders the 48-frame ISR scene on real RTL,
-# trains the detector, then runs GPU raster + INT8 fabric detect in one netlist.
+# RTL_RUN_TOKEN1 (masked, clone errors scrubbed).
 #
-# DISCLOSURE SURFACE — this log is world-readable. What reaches it and nothing more:
-#   · runner capability · byte-exact pass/fail counts · cycles per frame · held-out F1
-#   · the backdrop-coverage check (frames still showing the framebuffer clear)
-# NOT echoed: build logs (they carry the verilator command line = every RTL path and module
-# name), RTL source, weights, signal names. Build output goes to a file, filtered by ALLOWLIST.
+# STRUCTURE — why this is four jobs and not one script:
+#   A single job doing render + detect ran 2h10 for the render alone and would have come within
+#   minutes of the 6 h per-job ceiling. Frames are independent (set_cam/track are closed forms of
+#   the frame index), so both RTL passes shard by frame range and run as parallel jobs. The
+#   Verilated executable is cached on the RTL hash, so only the first run after an RTL change
+#   pays the build.
 #
-# The MP4 is composited on the laptop, not here: reel_house.py loads macOS system fonts and
-# falls back to a bitmap default on Linux, which looks broken. CI does the slow RTL half and
-# ships the frames + detector output as an artifact.
+#     build  ->  render x4 (12 frames each)  ->  train  ->  detect x4  ->  collect
+#
+# DISCLOSURE SURFACE — this log is world-readable: runner capability, byte-exact pass/fail,
+# cycles per frame, held-out F1, the backdrop check. NOT echoed: build logs (they carry the
+# verilator command line = every RTL path and module name), RTL source, weights, signal names.
+#
+# The MP4 is composited on the laptop: reel_house.py loads macOS system fonts and degrades to a
+# bitmap default here. CI does the slow RTL half and ships frames + detector output.
 on:
   workflow_dispatch:
     inputs:
       branch: { description: 'private branch to run', default: 'hp-vpu-pipe-verif' }
-      nf:     { description: 'frames to render', default: '48' }
+      nf:     { description: 'frames in the sequence', default: '48' }
 permissions: { contents: read }
 concurrency: { group: sky-demo, cancel-in-progress: false }
+env:
+  SKU: DLEN256_GPU_FAB
+  PRIV: rahulprospera/hp_vpu_ml_accelerator
 jobs:
-  scene:
+
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 350        # free-tier ceiling is 360; the two RTL sims are the long pole
-    env:
-      SKU: DLEN256_GPU_FAB
+    timeout-minutes: 120
+    outputs:
+      rtlkey: ${{ steps.k.outputs.key }}
     steps:
       - name: Check the private-repo tunnel is alive
         run: |
           set +e
-          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" HEAD >/dev/null 2>tok_err.txt
           if [ $? -ne 0 ]; then
-            echo "::error title=RTL_RUN_TOKEN1 is dead::Mint a fine-grained PAT (hp_vpu_ml_accelerator, Contents Read-only) and: gh secret set RTL_RUN_TOKEN1 --repo rahulprospera/RunDirectory"
-            sed -E 's#(https://)[^@]*@#\1***@#g' tok_err.txt | head -2
-            exit 1
+            echo "::error title=RTL_RUN_TOKEN1 is dead::Mint a fine-grained PAT (Contents Read-only) and: gh secret set RTL_RUN_TOKEN1 --repo rahulprospera/RunDirectory"
+            sed -E 's#(https://)[^@]*@#\1***@#g' tok_err.txt | head -2; exit 1
           fi
           echo "tunnel ok"
-      - name: Cache Verilator (tool)
+      - uses: actions/cache@v4
         id: vc
-        uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
       - name: Build Verilator (miss only)
         if: steps.vc.outputs.cache-hit != 'true'
@@ -50,72 +57,179 @@ jobs:
           git checkout v5.048 || git checkout stable
           autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
       - name: Deps
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3 python3-pip
-          pip3 install --quiet numpy pillow
-      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3 python3-pip && pip3 install --quiet numpy pillow
+      - name: Checkout PRIVATE repo (token masked)
         run: |
           set +e
           git clone --depth 1 --branch "${{ inputs.branch }}" \
-            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
-      - name: Runner capability (measure, do not assume)
-        run: echo "cores=$(nproc)  mem=$(free -g | awk '/^Mem:/{print $2}')GB  disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
-
-      - name: 1/3 render the scene on RTL
+      - name: Executable cache key (RTL + harnesses)
+        id: k
+        run: echo "key=sky-${{ env.SKU }}-${{ hashFiles('src/rtl/engines/hp_vpu_3_0/**','src/generated/**','src/verilator/tb_isr_scene_top.cpp','src/verilator/tb_isr_demo_top.cpp','src/verilator/tb_isr_demo_scene.inc','src/scripts/hp_vpu_3_0/build_top_v15_gentle.sh') }}" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v4
+        id: dut
+        with: { path: dut, key: "${{ steps.k.outputs.key }}" }
+      - name: Build both executables (miss only)
+        if: steps.dut.outputs.cache-hit != 'true'
         run: |
           export PATH=/opt/verilator/bin:$PATH
-          mkdir -p /tmp/vb
+          mkdir -p /tmp/vb dut
+          cd src
+          set +e
+          for h in tb_isr_scene_top:scene_fab tb_isr_demo_top:demo_fab; do
+            H="${h%%:*}"; O="${h##*:}"
+            SKU=$SKU HARNESS=$H.cpp TOP_OBJ=/tmp/vb/$O BUILD_JOBS="$(nproc)" ISR_NF=1 ISR_F1=0 \
+              ISR_OUT=/tmp/vb/probe ISR_W=/tmp/vb/none \
+              bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/build_$O.log 2>&1
+            if [ ! -x "/tmp/vb/$O/Vhp_vpu_top" ]; then echo "BUILD FAILED: $H"; exit 1; fi
+            mkdir -p ../dut/$O && cp -r /tmp/vb/$O/* ../dut/$O/
+            echo "built $H"
+          done
+      - name: Executable present
+        run: ls dut/scene_fab/Vhp_vpu_top dut/demo_fab/Vhp_vpu_top >/dev/null && echo "both executables ready"
+
+  render:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy: { fail-fast: false, matrix: { shard: [0, 1, 2, 3] } }
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip && pip3 install --quiet numpy pillow
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" src 2>clone_err.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - uses: actions/cache@v4
+        with: { path: dut, key: "${{ needs.build.outputs.rtlkey }}" }
+      - name: Render frames for this shard
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          NF=${{ inputs.nf }}; SH=${{ matrix.shard }}; PER=$(( (NF + 3) / 4 ))
+          F0=$(( SH * PER )); F1=$(( F0 + PER )); [ $F1 -gt $NF ] && F1=$NF
+          echo "shard $SH: frames $F0..$((F1-1)) of $NF"
+          mkdir -p /tmp/vb/scene_fab && cp -r dut/scene_fab/* /tmp/vb/scene_fab/
+          chmod +x /tmp/vb/scene_fab/Vhp_vpu_top
           cd src
           set +e
           SKU=$SKU HARNESS=tb_isr_scene_top.cpp TOP_OBJ=/tmp/vb/scene_fab BUILD_JOBS="$(nproc)" \
-            ISR_NF="${{ inputs.nf }}" ISR_OUT=/tmp/vb/sky48 \
+            ISR_NF=$NF ISR_F0=$F0 ISR_F1=$F1 ISR_OUT=/tmp/vb/sky48 \
             bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/render.log 2>&1
           echo "exit=$?" > /tmp/render.rc
-      - name: Render verdict — ALLOWLIST ONLY
+          mv /tmp/vb/sky48_truth.txt /tmp/vb/sky48_truth_$SH.txt 2>/dev/null || true
+      - name: Verdict — ALLOWLIST ONLY
         run: |
-          grep -E "^tb_isr_scene_top: pass=|^  resolution |^  GPU fill " /tmp/render.log || echo "no verdict line produced"
-          cat /tmp/render.rc
-          grep -q "exit=0" /tmp/render.rc || exit 1
+          grep -E "^tb_isr_scene_top: pass=|^  resolution " /tmp/render.log || echo "no verdict line produced"
+          cat /tmp/render.rc; grep -q "exit=0" /tmp/render.rc || exit 1
       - name: Backdrop coverage check (the reason for this run)
         run: |
           cd src
           python3 - <<'PY'
           import glob, sys, numpy as np
           sys.path.insert(0, 'scripts/hp_vpu_3_0'); import demo_train as T
-          bad = 0
-          fs = sorted(glob.glob('/tmp/vb/sky48_f*.ppm'))
+          fs = sorted(glob.glob('/tmp/vb/sky48_f*.ppm')); bad = 0
           for f in fs:
               a, w, h = T.read_ppm(f)
-              # 0xE4BE96 packed r|g<<8|b<<16 -> the framebuffer clear, also the sprite chroma key
-              if abs(np.asarray(a).astype(int)[0, w//2] - np.array([150,190,228])).sum() < 12:
-                  bad += 1
+              if abs(np.asarray(a).astype(int)[0, w//2] - np.array([150,190,228])).sum() < 12: bad += 1
           print("backdrop: %d/%d frames still show the clear at row 0 (want 0)" % (bad, len(fs)))
           sys.exit(1 if bad else 0)
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frames-${{ matrix.shard }}
+          path: |
+            /tmp/vb/sky48_f*.ppm
+            /tmp/vb/sky48_truth_*.txt
+          retention-days: 3
 
-      - name: 2/3 train the detector (held-out scored)
+  train:
+    needs: render
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip && pip3 install --quiet numpy pillow
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" src 2>clone_err.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - uses: actions/download-artifact@v4
+        with: { pattern: frames-*, merge-multiple: true, path: /tmp/vb }
+      - name: Merge shard truth files and train
         run: |
           cd src
+          n=$(ls /tmp/vb/sky48_f*.ppm | wc -l); echo "frames collected: $n / ${{ inputs.nf }}"
+          [ "$n" -eq "${{ inputs.nf }}" ] || { echo "ABORT: shards did not cover the sequence"; exit 1; }
+          head -1 $(ls /tmp/vb/sky48_truth_*.txt | head -1) > /tmp/vb/sky48_truth.txt
+          cat /tmp/vb/sky48_truth_*.txt | grep -v '^#' >> /tmp/vb/sky48_truth.txt
           python3 scripts/hp_vpu_3_0/demo_train.py /tmp/vb/sky48 /tmp/vb/sky 2>&1 | grep -E "frames |train |contrast |HELD-OUT|wrote"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weights
+          path: |
+            /tmp/vb/sky_w0.i8
+            /tmp/vb/sky_cfg.txt
+            /tmp/vb/sky48_truth.txt
+          retention-days: 3
 
-      - name: 3/3 GPU raster + INT8 fabric detect, one netlist
+  detect:
+    needs: [build, train]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy: { fail-fast: false, matrix: { shard: [0, 1, 2, 3] } }
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip && pip3 install --quiet numpy
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" src 2>clone_err.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - uses: actions/cache@v4
+        with: { path: dut, key: "${{ needs.build.outputs.rtlkey }}" }
+      - uses: actions/download-artifact@v4
+        with: { name: weights, path: /tmp/vb }
+      - name: GPU raster + INT8 fabric detect for this shard
         run: |
           export PATH=/opt/verilator/bin:$PATH
+          NF=${{ inputs.nf }}; SH=${{ matrix.shard }}; PER=$(( (NF + 3) / 4 ))
+          F0=$(( SH * PER )); F1=$(( F0 + PER )); [ $F1 -gt $NF ] && F1=$NF
+          echo "shard $SH: frames $F0..$((F1-1)) of $NF"
+          mkdir -p /tmp/vb/demo_fab && cp -r dut/demo_fab/* /tmp/vb/demo_fab/
+          chmod +x /tmp/vb/demo_fab/Vhp_vpu_top
           cd src
           set +e
           SKU=$SKU HARNESS=tb_isr_demo_top.cpp TOP_OBJ=/tmp/vb/demo_fab BUILD_JOBS="$(nproc)" \
-            ISR_NF="${{ inputs.nf }}" ISR_OUT=/tmp/vb/skyrun ISR_W=/tmp/vb/sky \
+            ISR_NF=$NF ISR_F0=$F0 ISR_F1=$F1 ISR_OUT=/tmp/vb/skyrun ISR_W=/tmp/vb/sky \
             bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/detect.log 2>&1
           echo "exit=$?" > /tmp/detect.rc
-      - name: Detect verdict — ALLOWLIST ONLY
+          mv /tmp/vb/skyrun_out.txt /tmp/vb/skyrun_out_$SH.txt 2>/dev/null || true
+      - name: Verdict — ALLOWLIST ONLY
         run: |
-          grep -E "^  raster |^  resolution |us/frame|^tb_isr_demo_top: pass=" /tmp/detect.log || echo "no verdict line produced"
-          cat /tmp/detect.rc
-          grep -q "exit=0" /tmp/detect.rc || exit 1
-      - name: Determinism + detection summary
+          grep -E "^  raster |us/frame|pass=" /tmp/detect.log || echo "no verdict line produced"
+          cat /tmp/detect.rc; grep -q "exit=0" /tmp/detect.rc || exit 1
+      - uses: actions/upload-artifact@v4
+        with: { name: "detect-${{ matrix.shard }}", path: /tmp/vb/skyrun_out_*.txt, retention-days: 3 }
+
+  collect:
+    needs: [render, train, detect]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip && pip3 install --quiet numpy
+      - uses: actions/download-artifact@v4
+        with: { pattern: "*", merge-multiple: true, path: /tmp/vb }
+      - name: Merge shards and report
         run: |
-          cd src
+          head -1 $(ls /tmp/vb/skyrun_out_*.txt | head -1) > /tmp/vb/skyrun_out.txt
+          cat /tmp/vb/skyrun_out_*.txt | grep -v '^#' | sort -n -k1 >> /tmp/vb/skyrun_out.txt
           cp /tmp/vb/sky_cfg.txt /tmp/vb/skyrun_cfg.txt
           python3 - <<'PY'
           import numpy as np
@@ -124,17 +238,15 @@ jobs:
           thr = int(open('/tmp/vb/sky_cfg.txt').read().split()[5])
           lg = np.array([[int(x) for x in v[4:20]] for v in rows])
           sky = [c for c in range(16) if c//4 < 3]
-          d = lg[:, sky] > thr
-          print("fabric  %s cyc  JITTER=%d over %d frames" % (sorted(set(fc.tolist())), fc.max()-fc.min(), len(rows)))
-          print("raster  %d..%d cyc  spread=%.1f%%" % (rc.min(), rc.max(), 100*(rc.max()-rc.min())/rc.mean()))
-          print("detect  %.2f cells/frame  ground row fires=%d (gated out of search volume)"
-                % (d.sum()/len(rows), (lg[:, [c for c in range(16) if c//4==3]] > thr).sum()))
+          print("frames  %d" % len(rows))
+          print("fabric  %s cyc   JITTER=%d" % (sorted(set(fc.tolist())), fc.max()-fc.min()))
+          print("raster  %d..%d cyc   spread=%.1f%%" % (rc.min(), rc.max(), 100*(rc.max()-rc.min())/rc.mean()))
+          print("detect  %.2f cells/frame   ground-row fires=%d (gated out of the search volume)"
+                % ((lg[:, sky] > thr).sum()/len(rows), (lg[:, [c for c in range(16) if c//4==3]] > thr).sum()))
           PY
-      - name: Ship frames + detector output (composite on the laptop)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: sky-demo-${{ inputs.nf }}f
+          name: sky-demo
           path: |
             /tmp/vb/sky48_f*.ppm
             /tmp/vb/sky48_truth.txt
@@ -142,5 +254,4 @@ jobs:
             /tmp/vb/sky_cfg.txt
             /tmp/vb/skyrun_out.txt
             /tmp/vb/skyrun_cfg.txt
-          if-no-files-found: warn
           retention-days: 7
