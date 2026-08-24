@@ -125,6 +125,21 @@ jobs:
         run: |
           grep -E "^tb_isr_scene_top: pass=|^  resolution " /tmp/render.log || echo "no verdict line produced"
           cat /tmp/render.rc; grep -q "exit=0" /tmp/render.rc || exit 1
+      - name: Failure triage (allowlisted; RTL-shaped lines stripped)
+        if: failure()
+        run: |
+          # Whitelist is right for a verdict but useless for debugging, so this strips the lines
+          # that name RTL -- .sv files, module/signal prefixes, verilator command lines -- and
+          # shows what is left. Build output must never reach this public log unfiltered.
+          for L in /tmp/render.log /tmp/detect.log; do
+            [ -f "$L" ] || continue
+            echo "--- $L, filtered ---"
+            tail -40 "$L" \
+              | grep -viE '\.sv\b|hp_vpu_[a-z_]+|verilator |\+incdir|--Mdir|-y |rtl/' \
+              | tail -15
+          done
+          grep -oE "(No such file or directory|Permission denied|command not found|cannot open|Segmentation fault|Assertion|BUILD FAILED|Error [0-9]+|make: \*\*\*)[^/]{0,70}" \
+            /tmp/render.log /tmp/detect.log 2>/dev/null | head -6 || true
       - name: Backdrop coverage check (the reason for this run)
         run: |
           cd src
@@ -215,6 +230,21 @@ jobs:
         run: |
           grep -E "^  raster |us/frame|pass=" /tmp/detect.log || echo "no verdict line produced"
           cat /tmp/detect.rc; grep -q "exit=0" /tmp/detect.rc || exit 1
+      - name: Failure triage (allowlisted; RTL-shaped lines stripped)
+        if: failure()
+        run: |
+          # Whitelist is right for a verdict but useless for debugging, so this strips the lines
+          # that name RTL -- .sv files, module/signal prefixes, verilator command lines -- and
+          # shows what is left. Build output must never reach this public log unfiltered.
+          for L in /tmp/render.log /tmp/detect.log; do
+            [ -f "$L" ] || continue
+            echo "--- $L, filtered ---"
+            tail -40 "$L" \
+              | grep -viE '\.sv\b|hp_vpu_[a-z_]+|verilator |\+incdir|--Mdir|-y |rtl/' \
+              | tail -15
+          done
+          grep -oE "(No such file or directory|Permission denied|command not found|cannot open|Segmentation fault|Assertion|BUILD FAILED|Error [0-9]+|make: \*\*\*)[^/]{0,70}" \
+            /tmp/render.log /tmp/detect.log 2>/dev/null | head -6 || true
       - uses: actions/upload-artifact@v4
         with: { name: "detect-${{ matrix.shard }}", path: /tmp/vb/skyrun_out_*.txt, retention-days: 3 }
 
