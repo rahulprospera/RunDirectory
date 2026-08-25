@@ -1,0 +1,56 @@
+name: hpml-leaf
+# PUBLIC runner-shell.  NO RTL COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime via a
+# read-only token, runs the LEAF gate, and keeps nothing.
+#
+# WHY THIS JOB EXISTS.  `flow/full.sh` (the CORE gate) cannot move: it needs `spike` and
+# `riscv64-unknown-elf-gcc` to regenerate `tb/progs/build/`, which is gitignored.  The LEAF gate is
+# the opposite — `flow/sim.sh` needs ONLY verilator and the RTL, both of which are in the repo, and
+# it is 63 INDEPENDENT `verilator --binary` builds.  That is the shape that belongs on a runner and
+# not on a laptop shared with two other agents.
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'hp_ml_core branch to test', default: 'rtl-leaves' }
+      only:   { description: 'single module (e.g. stq_slot), or blank for all 63', default: '' }
+permissions: { contents: read }
+concurrency: { group: hpml-leaf, cancel-in-progress: false }
+jobs:
+  leaf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Cache Verilator (tool)
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+          cd src && echo "HEAD $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
+      - name: Leaf gate — flow/sim.sh, all 63 self-checking benches
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src/rtl
+          # NJ: a dedicated runner has no owner to starve.  The default of 1 is for the shared box.
+          NJ=$(nproc) bash flow/sim.sh ${{ inputs.only }} 2>&1 | tee /tmp/sim.log
+          rc=${PIPESTATUS[0]}
+          echo "----- summary -----"; grep -E "^  (BAD|sim:)" /tmp/sim.log || true
+          exit $rc
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: hpml-leaf-log, path: /tmp/sim.log, retention-days: 14 }
