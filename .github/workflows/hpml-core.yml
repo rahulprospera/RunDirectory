@@ -144,7 +144,9 @@ jobs:
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
       - uses: actions/download-artifact@v4
-        with: { name: sim-w${{ matrix.w }}, path: dl }
+        with:
+          name: sim-w${{ matrix.w }}
+          path: dl
       - name: Stage sim
         run: |
           mkdir -p src/rtl/build/w
@@ -163,7 +165,10 @@ jobs:
           exit ${PIPESTATUS[0]}
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: diff-s${{ matrix.seed }}-w${{ matrix.w }}, path: /tmp/d.log, retention-days: 14 }
+        with:
+          name: diff-s${{ matrix.seed }}-w${{ matrix.w }}
+          path: /tmp/d.log
+          retention-days: 14
 
   # ---------------------------------------------------------------- directed kernels, per width
   directed:
@@ -185,7 +190,9 @@ jobs:
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
       - uses: actions/download-artifact@v4
-        with: { name: sim-w${{ matrix.w }}, path: dl }
+        with:
+          name: sim-w${{ matrix.w }}
+          path: dl
       - name: Stage sim
         run: |
           mkdir -p src/rtl/build/w
@@ -203,4 +210,7 @@ jobs:
           exit ${PIPESTATUS[0]}
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: directed-w${{ matrix.w }}, path: /tmp/q.log, retention-days: 14 }
+        with:
+          name: directed-w${{ matrix.w }}
+          path: /tmp/q.log
+          retention-days: 14
