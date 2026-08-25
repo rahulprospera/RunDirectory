@@ -1,0 +1,206 @@
+name: hpml-core
+# PUBLIC runner-shell.  NO RTL COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime.
+#
+# THIS IS THE GATE THAT ACTUALLY COSTS THE OWNER'S MACHINE.  `flow/full.sh` locally is ~40 minutes
+# of THREE cluster-scale verilator elaborations at 3.5-4.5 GB peak each, plus 9 sequential
+# differential combos — on a laptop shared with the SystemC and boot agents.  Here it is a graph:
+# build once per width, then fan the 9 seed x width combos out across runners.
+#
+# WHY IT NEEDS MORE THAN THE LEAF GATE.  `tb/progs/build/` is gitignored, and regenerating it needs
+# `riscv64-unknown-elf-gcc` (apt) and `spike` (source build, cached).  The gcc VERSION does not have
+# to match the owner's: `tb/progs/build.sh` runs spike on the SAME ELF it just built, so the golden
+# answer is spike's, not the compiler's.
+#
+# ⚠ EVERY JOB IS SIZED UNDER THE RUNTIME CAP.  Nothing here is one long step: a job that dies at the
+# wall is worth nothing, and `fail-fast: false` keeps one red shard from cancelling the rest.
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'hp_ml_core branch', default: 'rtl-leaves' }
+      seeds:  { description: 'differential seeds', default: '1 2 3' }
+      n:      { description: 'random programs per seed', default: '65' }
+permissions: { contents: read }
+concurrency: { group: hpml-core, cancel-in-progress: false }
+
+env:
+  REPO: rahulprospera/hp_ml_core
+
+jobs:
+  # ---------------------------------------------------------------- tools: warm both caches ONCE
+  # Without this, every downstream job misses on the first run and they all build spike in parallel.
+  tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Cache Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Cache Spike
+        id: sc
+        uses: actions/cache@v4
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
+      - name: Build Spike (miss only)
+        if: steps.sc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git g++ make autoconf device-tree-compiler \
+            libboost-regex-dev libboost-system-dev python3
+          git clone --depth 1 https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
+          cd /tmp/spk && mkdir build && cd build
+          ../configure --prefix=/opt/spike && make -j"$(nproc)" && sudo make install
+          /opt/spike/bin/spike --help 2>&1 | head -1
+
+  # ---------------------------------------------------------------- lint: independent, runs early
+  lint:
+    needs: tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Clone private
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - run: export PATH=/opt/verilator/bin:$PATH; cd src/rtl && bash flow/lint.sh | tail -3
+
+  # ---------------------------------------------------------------- build: ONE sim per width
+  # Cached on the RTL hash + W, so the 3 differential jobs that share a width restore instead of
+  # rebuilding.  This is the 3.5-4.5 GB step; 16 GB per runner has room, unlike a shared laptop.
+  build:
+    needs: tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy: { fail-fast: false, matrix: { w: [1, 2, 4] } }
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Clone private
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: Build sim W=${{ matrix.w }}
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src/rtl
+          python3 - config/rtl_core.json ${{ matrix.w }} <<'PY'
+          import json,sys
+          p,w=sys.argv[1],int(sys.argv[2]); c=json.load(open(p)); c["issue_width"]=w
+          json.dump(c,open(p,"w"),indent=2)
+          PY
+          python3 flow/gen_rtl_config.py >/dev/null
+          mkdir -p build/w
+          # the same -Werror set full.sh uses: widths here are f(W), so a leaf whose parameter the
+          # caller forgot is a HARD ERROR, not a warning.  That is what caught hpml_ls_stlfq at W=1.
+          verilator --binary --timing -Wall -Wno-fatal \
+            -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
+            -j "$(nproc)" --top-module tb_m5_program \
+            -y prim -y atoms -y leaves -y cluster -y tb \
+            --Mdir build/w -o tb tb/tb_m5_program.sv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-w${{ matrix.w }}
+          path: |
+            src/rtl/build/w/tb
+            src/rtl/hpml_cfg.vh
+            src/rtl/config/rtl_core.json
+          retention-days: 3
+
+  # ---------------------------------------------------------------- differential: 9-way fan-out
+  # The phase that found the stq_slot lap bug.  Runs strictly serially on the laptop; here the 9
+  # seed x width combos are 9 runners.  Each builds its own programs (gcc+spike) for its seed.
+  diff:
+    needs: [tools, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix: { w: [1, 2, 4], seed: [1, 2, 3] }
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - uses: actions/cache@v4
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
+      - name: RISC-V toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf python3
+      - name: Clone private
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - uses: actions/download-artifact@v4
+        with: { name: sim-w${{ matrix.w }}, path: dl }
+      - name: Stage sim
+        run: |
+          mkdir -p src/rtl/build/w
+          # upload-artifact@v4 strips to the LEAST COMMON ANCESTOR of its paths, which is
+          # `src/rtl` -- so the artifact holds build/w/tb, hpml_cfg.vh, config/rtl_core.json.
+          cp dl/build/w/tb src/rtl/build/w/tb && chmod +x src/rtl/build/w/tb
+          cp dl/hpml_cfg.vh src/rtl/ ; cp dl/config/rtl_core.json src/rtl/config/
+          ls -l src/rtl/build/w/tb
+      - name: Differential  seed=${{ matrix.seed }}  W=${{ matrix.w }}
+        run: |
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
+          cd src/rtl
+          # ⚠ KEEP THE FAILURE DETAIL.  full.sh pipes this through `grep "FAILED programs"` and
+          # THROWS THE DIAGNOSIS AWAY -- when 44/65 failed I had to re-run by hand to see anything.
+          SEED=${{ matrix.seed }} N=${{ inputs.n }} SIM=build/w/tb bash flow/rand_diff.sh 2>&1 | tee /tmp/d.log
+          exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: diff-s${{ matrix.seed }}-w${{ matrix.w }}, path: /tmp/d.log, retention-days: 14 }
+
+  # ---------------------------------------------------------------- directed kernels, per width
+  directed:
+    needs: [tools, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy: { fail-fast: false, matrix: { w: [1, 2, 4] } }
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - uses: actions/cache@v4
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
+      - name: RISC-V toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf python3
+      - name: Clone private
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - uses: actions/download-artifact@v4
+        with: { name: sim-w${{ matrix.w }}, path: dl }
+      - name: Stage sim
+        run: |
+          mkdir -p src/rtl/build/w
+          # upload-artifact@v4 strips to the LEAST COMMON ANCESTOR of its paths, which is
+          # `src/rtl` -- so the artifact holds build/w/tb, hpml_cfg.vh, config/rtl_core.json.
+          cp dl/build/w/tb src/rtl/build/w/tb && chmod +x src/rtl/build/w/tb
+          cp dl/hpml_cfg.vh src/rtl/ ; cp dl/config/rtl_core.json src/rtl/config/
+          ls -l src/rtl/build/w/tb
+      - name: Directed kernels  W=${{ matrix.w }}
+        run: |
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
+          cd src/rtl
+          bash tb/progs/build.sh >/dev/null 2>&1 || { echo "progs build FAILED"; exit 1; }
+          SIMS=build/w/tb bash flow/quick.sh 2>&1 | tee /tmp/q.log
+          exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: directed-w${{ matrix.w }}, path: /tmp/q.log, retention-days: 14 }
