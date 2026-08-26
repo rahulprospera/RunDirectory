@@ -74,6 +74,8 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: ccache
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache g++ python3
       - run: export PATH=/opt/verilator/bin:$PATH; cd src/rtl && bash flow/lint.sh | tail -3
 
   # ---------------------------------------------------------------- build: ONE sim per width
@@ -93,6 +95,8 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: ccache (the cached verilator's makefile hardcodes `ccache g++`)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache g++ python3
       - name: Build sim W=${{ matrix.w }}
         run: |
           export PATH=/opt/verilator/bin:$PATH
@@ -136,7 +140,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
       - name: RISC-V toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
         run: |
           set +e
@@ -182,7 +186,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
       - name: RISC-V toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
         run: |
           set +e
