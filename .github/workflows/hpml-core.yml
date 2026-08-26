@@ -82,8 +82,8 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
-      - name: ccache
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache g++ python3
+      - name: runtime deps of the cached tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq device-tree-compiler ccache g++ python3
       - run: export PATH=/opt/verilator/bin:$PATH; cd src/rtl && bash flow/lint.sh | tail -3
 
   # ---------------------------------------------------------------- build: ONE sim per width
@@ -103,8 +103,8 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
-      - name: ccache (the cached verilator's makefile hardcodes `ccache g++`)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache g++ python3
+      - name: runtime deps of the cached tools (see the note in the diff job)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq device-tree-compiler ccache g++ python3
       - name: Build sim W=${{ matrix.w }}
         run: |
           export PATH=/opt/verilator/bin:$PATH
@@ -148,7 +148,11 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
       - name: RISC-V toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
+        # ⚠ THE CACHED TOOLS CARRY RUNTIME DEPS THE CACHE DOES NOT.  /opt/verilator's generated
+        # makefile calls `ccache g++`; /opt/spike shells out to `dtc` to build its DTB.  Both were
+        # installed in `tools` (to BUILD them) and missing here (to RUN them), and each cost a
+        # round.  One set, installed identically in every job that restores a cache.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf device-tree-compiler ccache g++ python3
       - name: Clone private
         run: |
           set +e
@@ -194,7 +198,11 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
       - name: RISC-V toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
+        # ⚠ THE CACHED TOOLS CARRY RUNTIME DEPS THE CACHE DOES NOT.  /opt/verilator's generated
+        # makefile calls `ccache g++`; /opt/spike shells out to `dtc` to build its DTB.  Both were
+        # installed in `tools` (to BUILD them) and missing here (to RUN them), and each cost a
+        # round.  One set, installed identically in every job that restores a cache.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf device-tree-compiler ccache g++ python3
       - name: Clone private
         run: |
           set +e
@@ -221,18 +229,15 @@ jobs:
           # exactly the sin this file's commit message accuses full.sh of: the gate reports that
           # something broke and destroys the only evidence of what.
           which riscv64-unknown-elf-gcc riscv64-unknown-elf-objcopy spike || true
-          # ⚠ ARCH carries _zicsr_zifencei HERE AND NOT IN THE REPO.  The owner's spike is
-          # homebrew 1.1.1-dev; a runner builds master, which ENFORCES the spec split that moved
-          # Zicsr/Zifencei out of the base ISA.  With plain `rv64im` a CSR access in startup traps
-          # at once and spike commits NOTHING -- an EMPTY log, which mkmeta.py reports as "never
-          # wrote x28", i.e. a broken program.  The extensions are a superset: the reference is
-          # still spike's own execution of the same ELF.
-          ARCH=rv64im_zicsr_zifencei bash tb/progs/build.sh 2>&1 | tail -40
+          # (an _zicsr_zifencei override lived here for one round on a WRONG hypothesis -- the
+          # empty log was `dtc` missing, not an ISA trap.  Reverted: CI and the laptop must build
+          # the same programs or `k_ipc_corr` stops being a correlation.)
+          bash tb/progs/build.sh 2>&1 | tail -40
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
             echo "===== progs build FAILED.  Running spike by hand, STDERR AND ALL: ====="
             E=$(ls tb/progs/build/*.elf 2>/dev/null | head -1)
             echo "elf: $E"
-            spike --isa=rv64im_zicsr_zifencei -m0x80000000:0x40000 --log-commits -l \
+            spike --isa=rv64im -m0x80000000:0x40000 --log-commits -l \
                   --log=/tmp/hand.log "$E" 2>&1 | head -20 || true
             echo "--- /tmp/hand.log first 5 lines ($(wc -l </tmp/hand.log 2>/dev/null || echo 0) total) ---"
             head -5 /tmp/hand.log 2>/dev/null || true
