@@ -48,7 +48,7 @@ jobs:
       - name: Cache Spike
         id: sc
         uses: actions/cache@v4
-        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1.1.0 }
       - name: Build Spike (miss only)
         if: steps.sc.outputs.cache-hit != 'true'
         run: |
@@ -144,7 +144,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
       - uses: actions/cache@v4
-        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1.1.0 }
       - name: RISC-V toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
@@ -190,7 +190,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
       - uses: actions/cache@v4
-        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1.1.0 }
       - name: RISC-V toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
