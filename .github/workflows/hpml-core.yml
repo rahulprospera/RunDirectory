@@ -140,7 +140,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
       - name: RISC-V toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf ccache g++ python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
         run: |
           set +e
@@ -186,7 +186,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1 }
       - name: RISC-V toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf ccache g++ python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
         run: |
           set +e
@@ -209,7 +209,12 @@ jobs:
         run: |
           export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
           cd src/rtl
-          bash tb/progs/build.sh >/dev/null 2>&1 || { echo "progs build FAILED"; exit 1; }
+          # ⚠ NEVER SUPPRESS THIS.  It was `>/dev/null 2>&1 || echo "progs build FAILED"`, which is
+          # exactly the sin this file's commit message accuses full.sh of: the gate reports that
+          # something broke and destroys the only evidence of what.
+          which riscv64-unknown-elf-gcc riscv64-unknown-elf-objcopy spike || true
+          bash tb/progs/build.sh 2>&1 | tail -40
+          [ ${PIPESTATUS[0]} -eq 0 ] || { echo "progs build FAILED (output above)"; exit 1; }
           SIMS=build/w/tb bash flow/quick.sh 2>&1 | tee /tmp/q.log
           exit ${PIPESTATUS[0]}
       - uses: actions/upload-artifact@v4
