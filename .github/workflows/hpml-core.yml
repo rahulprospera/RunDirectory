@@ -221,13 +221,21 @@ jobs:
           # exactly the sin this file's commit message accuses full.sh of: the gate reports that
           # something broke and destroys the only evidence of what.
           which riscv64-unknown-elf-gcc riscv64-unknown-elf-objcopy spike || true
-          bash tb/progs/build.sh 2>&1 | tail -40
+          # ⚠ ARCH carries _zicsr_zifencei HERE AND NOT IN THE REPO.  The owner's spike is
+          # homebrew 1.1.1-dev; a runner builds master, which ENFORCES the spec split that moved
+          # Zicsr/Zifencei out of the base ISA.  With plain `rv64im` a CSR access in startup traps
+          # at once and spike commits NOTHING -- an EMPTY log, which mkmeta.py reports as "never
+          # wrote x28", i.e. a broken program.  The extensions are a superset: the reference is
+          # still spike's own execution of the same ELF.
+          ARCH=rv64im_zicsr_zifencei bash tb/progs/build.sh 2>&1 | tail -40
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "===== progs build FAILED.  What spike actually emitted: ====="
-            spike --version 2>&1 | head -2 || true
-            for f in tb/progs/build/*.spike; do
-              echo "--- $f (first 5 commit lines) ---"; head -5 "$f"; break
-            done
+            echo "===== progs build FAILED.  Running spike by hand, STDERR AND ALL: ====="
+            E=$(ls tb/progs/build/*.elf 2>/dev/null | head -1)
+            echo "elf: $E"
+            spike --isa=rv64im_zicsr_zifencei -m0x80000000:0x40000 --log-commits -l \
+                  --log=/tmp/hand.log "$E" 2>&1 | head -20 || true
+            echo "--- /tmp/hand.log first 5 lines ($(wc -l </tmp/hand.log 2>/dev/null || echo 0) total) ---"
+            head -5 /tmp/hand.log 2>/dev/null || true
             exit 1
           fi
           SIMS=build/w/tb bash flow/quick.sh 2>&1 | tee /tmp/q.log
