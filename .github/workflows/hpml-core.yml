@@ -55,7 +55,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git g++ make autoconf device-tree-compiler \
             libboost-regex-dev libboost-system-dev python3
-          git clone --depth 1 https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
+          # ⚠ PIN IT.  master is far newer than the owner's homebrew 1.1.1-dev, and `mkmeta.py`'s
+          # CMT regex parses `--log-commits` by SHAPE:
+          #     core   0: 3 0x000000008000000e (0x8e2a) x28 0x00000000012adefd
+          # A format change makes every program "never write x28" -- the program runs fine and the
+          # PARSER goes blind.  Pin to the last tagged release rather than track master.
+          git clone https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
+          cd /tmp/spk && git checkout v1.1.0 && cd /
           cd /tmp/spk && mkdir build && cd build
           ../configure --prefix=/opt/spike && make -j"$(nproc)" && sudo make install
           /opt/spike/bin/spike --help 2>&1 | head -1
@@ -214,7 +220,14 @@ jobs:
           # something broke and destroys the only evidence of what.
           which riscv64-unknown-elf-gcc riscv64-unknown-elf-objcopy spike || true
           bash tb/progs/build.sh 2>&1 | tail -40
-          [ ${PIPESTATUS[0]} -eq 0 ] || { echo "progs build FAILED (output above)"; exit 1; }
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "===== progs build FAILED.  What spike actually emitted: ====="
+            spike --version 2>&1 | head -2 || true
+            for f in tb/progs/build/*.spike; do
+              echo "--- $f (first 5 commit lines) ---"; head -5 "$f"; break
+            done
+            exit 1
+          fi
           SIMS=build/w/tb bash flow/quick.sh 2>&1 | tee /tmp/q.log
           exit ${PIPESTATUS[0]}
       - uses: actions/upload-artifact@v4
