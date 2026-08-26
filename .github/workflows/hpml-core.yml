@@ -48,23 +48,25 @@ jobs:
       - name: Cache Spike
         id: sc
         uses: actions/cache@v4
-        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1.1.0 }
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
       - name: Build Spike (miss only)
         if: steps.sc.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y git g++ make autoconf device-tree-compiler \
             libboost-regex-dev libboost-system-dev python3
-          # ⚠ PIN IT.  master is far newer than the owner's homebrew 1.1.1-dev, and `mkmeta.py`'s
-          # CMT regex parses `--log-commits` by SHAPE:
-          #     core   0: 3 0x000000008000000e (0x8e2a) x28 0x00000000012adefd
-          # A format change makes every program "never write x28" -- the program runs fine and the
-          # PARSER goes blind.  Pin to the last tagged release rather than track master.
-          git clone https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
-          cd /tmp/spk && git checkout v1.1.0 && cd /
+          # ⚠ NOT v1.1.0 -- IT DOES NOT COMPILE on Ubuntu 24.04 / gcc 13 (rfb.o, device.o).  Master
+          # builds, so track it; the LOG FORMAT skew against `mkmeta.py` is handled by the
+          # diagnostic in the progs step, which prints the real lines so the regex can be matched
+          # to them instead of guessed at.
+          git clone --depth 1 https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
           cd /tmp/spk && mkdir build && cd build
           ../configure --prefix=/opt/spike && make -j"$(nproc)" && sudo make install
-          /opt/spike/bin/spike --help 2>&1 | head -1
+          # ⚠ NO PIPE.  This read `... | head -1`, so the step's exit status was HEAD's -- always 0.
+          # `tools` reported SUCCESS with no spike installed and every downstream job then failed
+          # with 'spike: not found'.  Same PIPESTATUS bug this file fixes twice elsewhere.
+          test -x /opt/spike/bin/spike || { echo "SPIKE DID NOT INSTALL"; exit 1; }
+          /opt/spike/bin/spike --help >/tmp/sp.txt 2>&1; head -1 /tmp/sp.txt
 
   # ---------------------------------------------------------------- lint: independent, runs early
   lint:
@@ -144,7 +146,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
       - uses: actions/cache@v4
-        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1.1.0 }
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
       - name: RISC-V toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
@@ -190,7 +192,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
       - uses: actions/cache@v4
-        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-v1.1.0 }
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
       - name: RISC-V toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf ccache g++ python3
       - name: Clone private
