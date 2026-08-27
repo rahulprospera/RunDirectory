@@ -17,7 +17,16 @@ concurrency: { group: hpml-leaf, cancel-in-progress: false }
 jobs:
   leaf:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # SHARDED.  Unsharded this ran 1h46m and returned ZERO -- no partial output, no artifact -- and
+    # a job that long on free public runners is also the kind that looks like abuse.  The gate is 63
+    # INDEPENDENT verilator builds, so fan-out is the ONLY win available: a single cloud job (4 vCPU)
+    # is SLOWER than the owner's 12-core laptop, which is why an unsharded cloud run is strictly
+    # worse than running locally and should never be written.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false          # one red shard must not cancel its siblings
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - name: Cache Verilator (tool)
         id: vc
@@ -41,16 +50,26 @@ jobs:
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
           cd src && echo "HEAD $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
-      - name: Leaf gate — flow/sim.sh, all 63 self-checking benches
+      - name: Leaf gate — flow/sim.sh, shard ${{ matrix.shard }} of 12 (small benches)
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd src/rtl
+          # SMALL BUILD JOBS ONLY.  These are the COMPOSED tops -- a whole frontend+midcore+ls
+          # elaboration each, minutes apiece -- and a 4 vCPU runner is slower at any one of them than
+          # the owner's 12-core laptop.  Fan-out only helps the many small independent builds, so the
+          # big ones stay local.
+          HEAVY="m5_program dmmu_ls paged_ls irq_arch m2_retire m3_bundle m4_mem m5_fe_mid time_winv trap_state hpml_frontend" 
           # NJ: a dedicated runner has no owner to starve.  The default of 1 is for the shared box.
-          NJ=$(nproc) bash flow/sim.sh ${{ inputs.only }} 2>&1 | tee /tmp/sim.log
+          # `only` overrides sharding: a single named module is already one job's worth.
+          if [ -n "${{ inputs.only }}" ]; then
+            NJ=$(nproc) bash flow/sim.sh ${{ inputs.only }} 2>&1 | tee /tmp/sim.log
+          else
+            SHARD=${{ matrix.shard }}/12 SKIP="$HEAVY" NJ=$(nproc) bash flow/sim.sh 2>&1 | tee /tmp/sim.log
+          fi
           rc=${PIPESTATUS[0]}
           echo "----- summary -----"; grep -E "^  (BAD|sim:)" /tmp/sim.log || true
           exit $rc
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
-        with: { name: hpml-leaf-log, path: /tmp/sim.log, retention-days: 14 }
+        with: { name: hpml-leaf-log-shard-${{ matrix.shard }}, path: /tmp/sim.log, retention-days: 14 }
