@@ -72,4 +72,10 @@ jobs:
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
-        with: { name: hpml-leaf-log-shard-${{ matrix.shard }}, path: /tmp/sim.log, retention-days: 14 }
+        # ⚠ BLOCK mapping, not flow.  A `${{ }}` expression inside a `{ ... }` flow mapping breaks
+        # the YAML parser -- the `{{` reads as a nested flow map -- and the whole workflow then fails
+        # to parse, which GitHub reports as a 0-second run with no jobs and no annotation.
+        with:
+          name: hpml-leaf-log-shard-${{ matrix.shard }}
+          path: /tmp/sim.log
+          retention-days: 14
