@@ -1,0 +1,181 @@
+name: hpml-timing2
+# ROUND 2 VERIFICATION for `rtl-timing-2`.  PUBLIC runner-shell, NO RTL COMMITTED HERE — clones the
+# PRIVATE hp_ml_core at runtime with a read-only token and keeps nothing.
+#
+# WHY THIS EXISTS SEPARATELY FROM hpml-leaf.  The leaf gate needs ONLY verilator + the RTL, so it
+# runs 63 tiny builds and excludes the composed tops as HEAVY.  These five benches are the exact
+# opposite: they are the ONLY coverage of the three leaves round 2 is cutting, and they
+# `$readmemh` COMPILED PROGRAM IMAGES out of `tb/progs/build` and `tb/dprogs/build`, both of which
+# are GITIGNORED.  That is why they were on the HEAVY exclude list — a runner could not build them
+# without `riscv64-unknown-elf-gcc` and `spike`.  hpml-core already installs and caches both, so
+# this job reuses that recipe and the exclusion goes away.
+#
+# COVERAGE MAP (none of the three cut leaves has its OWN bench — all are transitive):
+#   hpml_fe_l0_tag -> tb_hpml_frontend (THE FE COHERENCE GATE — mandatory for an FE change),
+#                     tb_dmmu_ls, tb_paged_ls, tb_irq_arch
+#   rob_ctrl       -> tb_rob_banked  (the only bench that instantiates it)
+#   hpml_ls_miss   -> tb_dmmu_ls, and via hpml_ls_unit -> tb_paged_ls
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'hp_ml_core branch to verify'
+        default: 'rtl-timing-2'
+      benches:
+        description: 'space-separated bench list (no tb_ prefix)'
+        default: 'hpml_frontend rob_banked dmmu_ls paged_ls irq_arch'
+      widths:
+        description: 'JSON list of issue widths'
+        default: '[1, 2, 4]'
+permissions: { contents: read }
+concurrency: { group: hpml-timing2, cancel-in-progress: false }
+env:
+  REPO: rahulprospera/hp_ml_core
+
+jobs:
+  # ------------------------------------------------------------------ build/cache the tools ONCE
+  # Without this every matrix job misses the cache on a cold key and they all build spike in
+  # parallel — the same lesson hpml-core's header records.
+  tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Cache Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Cache spike
+        id: sc
+        uses: actions/cache@v4
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
+      - name: Deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev \
+            device-tree-compiler gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Build spike (miss only)
+        if: steps.sc.outputs.cache-hit != 'true'
+        run: |
+          # NOT v1.1.0 — it does not compile on Ubuntu 24.04 / gcc 13.  Master, as hpml-core found.
+          git clone --depth 1 https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
+          mkdir -p /tmp/spk/build && cd /tmp/spk/build
+          ../configure --prefix=/opt/spike && make -j"$(nproc)" && sudo make install
+      - name: Prove the tools actually installed
+        # A `tools` job reporting SUCCESS with no spike installed made every downstream job fail
+        # with 'spike: not found'.  Assert, do not assume.
+        run: |
+          test -x /opt/verilator/bin/verilator || { echo "VERILATOR MISSING"; exit 1; }
+          test -x /opt/spike/bin/spike        || { echo "SPIKE MISSING";     exit 1; }
+          /opt/verilator/bin/verilator --version
+          /opt/spike/bin/spike --help 2>&1 | head -1 || true
+
+  # ------------------------------------------------------------------ one job per (bench, width)
+  verif:
+    needs: tools
+    runs-on: ubuntu-latest
+    # tb_irq_arch sweeps EVERY injection cycle of 5 programs; injection cost grows with program
+    # length squared, so one width is ~25-30 min of run on top of the build.  A 20-minute cap cut
+    # it mid-sweep once and printed no self-test line, which reads exactly like a wedge.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false        # one red bench must not cancel the rest of the matrix
+      matrix:
+        bench: [hpml_frontend, rob_banked, dmmu_ls, paged_ls, irq_arch]
+        w: [1, 2, 4]
+    steps:
+      - name: Restore Verilator
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Restore spike
+        uses: actions/cache@v4
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
+      - name: Runtime deps
+        # The CACHED tools carry runtime deps the cache does not: verilator's generated makefile
+        # calls `ccache g++`, and spike shells out to `dtc`.  Installed to BUILD them, missing to
+        # RUN them — that cost hpml-core two rounds.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
+            device-tree-compiler ccache g++ python3
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          cd src && echo "HEAD $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
+      - name: Set W=${{ matrix.w }} and regenerate hpml_cfg.vh
+        run: |
+          cd src/rtl
+          python3 - config/rtl_core.json ${{ matrix.w }} <<'PY'
+          import json,sys
+          p,w = sys.argv[1], int(sys.argv[2])
+          c = json.load(open(p)); c["issue_width"] = w
+          json.dump(c, open(p,"w"), indent=2)
+          PY
+          python3 flow/gen_rtl_config.py
+          echo "issue_width=$(python3 -c "import json;print(json.load(open('config/rtl_core.json'))['issue_width'])")"
+          grep -E '^`define HPML_W' hpml_cfg.vh
+      - name: Build the program images (this is why these benches were HEAVY)
+        run: |
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
+          cd src/rtl
+          # tb/progs/build and tb/dprogs/build are gitignored; every bench below $readmemh's out of
+          # them.  Build them ALL — they are seconds each and cheaper than mapping bench->script.
+          rc=0
+          for s in tb/progs/build.sh tb/progs/build_irq.sh tb/progs/build_paged.sh \
+                   tb/progs/build_kern.sh tb/dprogs/build_dpage.sh; do
+            [ -x "$s" ] || chmod +x "$s" 2>/dev/null || true
+            echo "--- $s"
+            bash "$s" > /tmp/$(basename $s).log 2>&1 || { echo "  FAILED (tail):"; tail -15 /tmp/$(basename $s).log; rc=1; }
+          done
+          echo "progs built: $(ls tb/progs/build/*.hex 2>/dev/null | wc -l)  dprogs: $(ls tb/dprogs/build/*.hex 2>/dev/null | wc -l)"
+          exit $rc
+      - name: Build tb_${{ matrix.bench }} @ W=${{ matrix.w }}
+        run: |
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
+          cd src/rtl
+          # -Werror-PINMISSING / WIDTH*: widths here are f(W), so a leaf whose parameter the caller
+          # forgot elaborates CORRECTLY at one width and wrong at the others.
+          verilator --binary --timing -Wall -Wno-fatal \
+            -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
+            -j "$(nproc)" --top-module tb_${{ matrix.bench }} \
+            -y prim -y atoms -y leaves -y cluster -y tb \
+            --Mdir build/ci -o t tb/tb_${{ matrix.bench }}.sv 2>&1 | tee /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          [ $rc -eq 0 ] || { echo "=== BUILD FAILED ==="; grep -E '^%(Error|Warning)' /tmp/build.log | head -20; exit $rc; }
+      - name: Run tb_${{ matrix.bench }} @ W=${{ matrix.w }}
+        run: |
+          cd src/rtl
+          set +e
+          ./build/ci/t 2>&1 | tee /tmp/run.log
+          rc=${PIPESTATUS[0]}
+          echo "===== VERDICT ====="
+          # A TIMEOUT AND A WEDGE ARE NOT THE SAME OBSERVATION.  Say which one this was.
+          if ! grep -q "self-test" /tmp/run.log; then
+            echo "NO SELF-TEST LINE (rc=$rc) — treat as INCONCLUSIVE, not as a pass"
+            tail -30 /tmp/run.log
+            exit 1
+          fi
+          grep -E "self-test" /tmp/run.log
+          grep -cE "^ *FAIL|ERROR" /tmp/run.log | sed 's/^/FAIL\/ERROR lines: /'
+          grep -qE "self-test PASS" /tmp/run.log || exit 1
+          exit 0
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        # ⚠ BLOCK mapping, not flow.  A `${{ }}` inside a `{ ... }` flow map breaks the YAML parser
+        # and GitHub reports it as a 0-second run with no jobs and no annotation.
+        with:
+          name: timing2-${{ matrix.bench }}-w${{ matrix.w }}
+          path: |
+            /tmp/run.log
+            /tmp/build.log
+          retention-days: 14
