@@ -16,6 +16,13 @@ name: hpml-timing2
 #   rob_ctrl       -> tb_rob_banked  (the only bench that instantiates it)
 #   hpml_ls_miss   -> tb_dmmu_ls, and via hpml_ls_unit -> tb_paged_ls
 on:
+  # OVERSIGHT.  The synth agent validates TIMING on his Windows box; functional regressions from
+  # his quick cuts are the verif agent's catch, and that cannot wait for someone to notice a push.
+  # A push trigger cannot work here — this public shell holds no RTL and the commits land in the
+  # PRIVATE repo — so poll instead.  Public-repo runners are free, and `concurrency` below means a
+  # scheduled run never stacks on a dispatched one.
+  schedule:
+    - cron: '17 */6 * * *'      # every 6h, offset off the hour to dodge the scheduler stampede
   workflow_dispatch:
     inputs:
       branch:
@@ -107,7 +114,7 @@ jobs:
       - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
         run: |
           set +e
-          git clone --depth 1 --branch "${{ inputs.branch }}" \
+          git clone --depth 1 --branch "${{ inputs.branch || 'rtl-timing-2' }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
           cd src && echo "HEAD $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
