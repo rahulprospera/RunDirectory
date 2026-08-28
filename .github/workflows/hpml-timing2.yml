@@ -194,14 +194,21 @@ jobs:
           rc=${PIPESTATUS[0]}
           echo "===== VERDICT ====="
           # A TIMEOUT AND A WEDGE ARE NOT THE SAME OBSERVATION.  Say which one this was.
-          if ! grep -q "self-test" /tmp/run.log; then
+          if ! grep -qi "self-test" /tmp/run.log; then
             echo "NO SELF-TEST LINE (rc=$rc) — treat as INCONCLUSIVE, not as a pass"
             tail -30 /tmp/run.log
             exit 1
           fi
-          grep -E "self-test" /tmp/run.log
+          # *** TWO CONVENTIONS LIVE IN tb/: 34 benches print "self-test: PASS" and 11 print
+          # "self-test PASS". ***  This step first grepped the strict form and marked rob_banked RED
+          # at all three widths while its log said "rob_banked self-test: PASS (fails=0)".  That is
+          # precisely the defect that kept the leaf gate dark for months — one grep, two
+          # conventions.  Do what flow/sim.sh does: take the self-test LINE, then test it for PASS.
+          line=$(grep -i "self-test" /tmp/run.log | head -1)
+          echo "$line"
           grep -cE "^ *FAIL|ERROR" /tmp/run.log | sed 's/^/FAIL\/ERROR lines: /'
-          grep -qE "self-test PASS" /tmp/run.log || exit 1
+          echo "$line" | grep -q PASS || { echo "VERDICT: FAIL"; exit 1; }
+          echo "VERDICT: PASS"
           exit 0
       - name: Upload log
         if: always()
