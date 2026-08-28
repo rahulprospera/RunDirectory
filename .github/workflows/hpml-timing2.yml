@@ -34,6 +34,9 @@ on:
       widths:
         description: 'JSON list of issue widths'
         default: '[1,2,4]'
+      defines:
+        description: 'verilator -D flags, e.g. "-DHPML_FEXP_PIPE=1 -DHPML_RMW_PIPE=1" (sweeps a TIMING ARM)'
+        default: ''
 permissions: { contents: read }
 concurrency: { group: hpml-timing2, cancel-in-progress: false }
 env:
@@ -166,7 +169,10 @@ jobs:
           done
           echo "progs built: $(ls tb/progs/build/*.hex 2>/dev/null | wc -l)  dprogs: $(ls tb/dprogs/build/*.hex 2>/dev/null | wc -l)"
           exit $rc
-      - name: Build tb_${{ matrix.bench }} @ W=${{ matrix.w }}
+      # ARMS.  Timing arms are LEAF parameters and `-G` reaches top-module parameters only, so an
+      # arm can only be exercised through its -D.  Without this input the arms are untestable and
+      # a green gate says nothing about them.
+      - name: Build tb_${{ matrix.bench }} @ W=${{ matrix.w }} ${{ inputs.defines }}
         run: |
           export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
           cd src/rtl
@@ -174,6 +180,7 @@ jobs:
           # forgot elaborates CORRECTLY at one width and wrong at the others.
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
+            ${{ inputs.defines }} \
             -j "$(nproc)" --top-module tb_${{ matrix.bench }} \
             -y prim -y atoms -y leaves -y cluster -y tb \
             --Mdir /mnt/rtlbuild/ci -o t tb/tb_${{ matrix.bench }}.sv 2>&1 | tee /tmp/build.log
