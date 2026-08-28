@@ -111,6 +111,19 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
             device-tree-compiler ccache g++ python3
+      - name: Free disk
+        # ubuntu-latest ships ~14 GB free, and `verilator --binary` on a COMPOSED top writes far
+        # more C++ than a leaf does.  First run died with
+        #   %Error: Can't write file: build/ci/Vtb_rob_banked__Syms__Slow.cpp
+        # on rob_banked/W1 and hpml_frontend/W4 — a full disk, NOT an RTL error, and it looks
+        # nothing like one.  Reclaim the preinstalled toolchains nothing here uses.
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/share/swift /usr/local/.ghcup || true
+          sudo apt-get clean
+          echo "after:";  df -h / | tail -1
       - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
         run: |
           set +e
@@ -157,7 +170,14 @@ jobs:
             -y prim -y atoms -y leaves -y cluster -y tb \
             --Mdir build/ci -o t tb/tb_${{ matrix.bench }}.sv 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
-          [ $rc -eq 0 ] || { echo "=== BUILD FAILED ==="; grep -E '^%(Error|Warning)' /tmp/build.log | head -20; exit $rc; }
+          if [ $rc -ne 0 ]; then
+            echo "=== BUILD FAILED ==="
+            grep -E '^%(Error|Warning)' /tmp/build.log | head -20
+            # "Can't write file" is a FULL DISK wearing an RTL error's clothes.  Print df so the
+            # next reader does not go looking for a Verilog bug that is not there.
+            echo "--- disk at failure ---"; df -h / | tail -1
+            exit $rc
+          fi
       - name: Run tb_${{ matrix.bench }} @ W=${{ matrix.w }}
         run: |
           cd src/rtl
