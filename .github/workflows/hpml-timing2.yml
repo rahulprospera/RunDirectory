@@ -29,11 +29,11 @@ on:
         description: 'hp_ml_core branch to verify'
         default: 'rtl-timing-2'
       benches:
-        description: 'space-separated bench list (no tb_ prefix)'
-        default: 'hpml_frontend rob_banked dmmu_ls paged_ls irq_arch'
+        description: 'JSON list of benches (no tb_ prefix)'
+        default: '["hpml_frontend","rob_banked","dmmu_ls","paged_ls","irq_arch"]'
       widths:
         description: 'JSON list of issue widths'
-        default: '[1, 2, 4]'
+        default: '[1,2,4]'
 permissions: { contents: read }
 concurrency: { group: hpml-timing2, cancel-in-progress: false }
 env:
@@ -94,8 +94,10 @@ jobs:
     strategy:
       fail-fast: false        # one red bench must not cancel the rest of the matrix
       matrix:
-        bench: [hpml_frontend, rob_banked, dmmu_ls, paged_ls, irq_arch]
-        w: [1, 2, 4]
+        # fromJSON so a subset can be re-run after a fix.  The `||` fallbacks matter: a SCHEDULED
+        # run carries no inputs at all, and fromJSON('') is a hard parse failure.
+        bench: ${{ fromJSON(inputs.benches || '["hpml_frontend","rob_banked","dmmu_ls","paged_ls","irq_arch"]') }}
+        w: ${{ fromJSON(inputs.widths || '[1,2,4]') }}
     steps:
       - name: Restore Verilator
         uses: actions/cache@v4
@@ -118,12 +120,18 @@ jobs:
         # on rob_banked/W1 and hpml_frontend/W4 — a full disk, NOT an RTL error, and it looks
         # nothing like one.  Reclaim the preinstalled toolchains nothing here uses.
         run: |
-          echo "before:"; df -h / | tail -1
+          echo "before:"; df -h / /mnt 2>/dev/null | tail -3
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
                       /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
                       /usr/share/swift /usr/local/.ghcup || true
           sudo apt-get clean
-          echo "after:";  df -h / | tail -1
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          # *** BUILD ON /mnt. ***  Trimming / was not enough: hpml_frontend and rob_banked still
+          # died writing their Vtb_*__Syms__*.cpp, which are the biggest files a large elaboration
+          # emits.  ubuntu-latest mounts a much larger ephemeral disk at /mnt -- use it for the
+          # obj dir instead of fighting for room on /.
+          sudo mkdir -p /mnt/rtlbuild && sudo chown -R "$(id -u):$(id -g)" /mnt/rtlbuild
+          echo "after:";  df -h / /mnt 2>/dev/null | tail -3
       - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
         run: |
           set +e
@@ -168,7 +176,7 @@ jobs:
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
             -j "$(nproc)" --top-module tb_${{ matrix.bench }} \
             -y prim -y atoms -y leaves -y cluster -y tb \
-            --Mdir build/ci -o t tb/tb_${{ matrix.bench }}.sv 2>&1 | tee /tmp/build.log
+            --Mdir /mnt/rtlbuild/ci -o t tb/tb_${{ matrix.bench }}.sv 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
           if [ $rc -ne 0 ]; then
             echo "=== BUILD FAILED ==="
@@ -182,7 +190,7 @@ jobs:
         run: |
           cd src/rtl
           set +e
-          ./build/ci/t 2>&1 | tee /tmp/run.log
+          /mnt/rtlbuild/ci/t 2>&1 | tee /tmp/run.log
           rc=${PIPESTATUS[0]}
           echo "===== VERDICT ====="
           # A TIMEOUT AND A WEDGE ARE NOT THE SAME OBSERVATION.  Say which one this was.
