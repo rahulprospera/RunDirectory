@@ -38,7 +38,12 @@ on:
         description: 'verilator -D flags, e.g. "-DHPML_FEXP_PIPE=1 -DHPML_RMW_PIPE=1" (sweeps a TIMING ARM)'
         default: ''
 permissions: { contents: read }
-concurrency: { group: hpml-timing2, cancel-in-progress: false }
+# ⚠ The group MUST include the arm.  With a single fixed group only ONE run may be queued, so
+# dispatching four arms back-to-back made each new one CANCEL the previous — four arm gates lost.
+# Keyed by branch+defines, different arms run in parallel and only a re-run of the SAME arm queues.
+concurrency:
+  group: hpml-timing2-${{ inputs.branch }}-${{ inputs.defines }}
+  cancel-in-progress: false
 env:
   REPO: rahulprospera/hp_ml_core
 
