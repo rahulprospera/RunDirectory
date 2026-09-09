@@ -40,7 +40,7 @@ jobs:
         run: |
           set +e
           git clone --depth 1 --branch "${{ inputs.branch }}" \
-            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_ml_core.git" core 2>ce.txt
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" core 2>ce.txt
           [ $? -eq 0 ] && echo "core checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' ce.txt; exit 1; }
       - name: Config + program images
         run: |
