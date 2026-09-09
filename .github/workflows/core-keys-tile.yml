@@ -81,7 +81,12 @@ jobs:
             -y $V -y $V/deps \
             +incdir+$V/deps +incdir+$GITHUB_WORKSPACE/tile/generated \
             $GITHUB_WORKSPACE/tile/generated/hp_vpu_3_0_config_pkg.sv \
-            $V/deps/hp_vpu_pkg.sv $V/hpml_tile_bridge.sv $V/bind_tile.sv \
+            $V/deps/hp_vpu_pkg.sv \
+            $V/hp_vpu_red_pair.sv $V/hp_vpu_pp_add.sv $V/hp_vpu_lut_rom.sv \
+            $V/hp_vpu_decode.sv $V/hp_vpu_csr.sv $V/hp_vpu_hazard.sv $V/hp_vpu_sequencer.sv \
+            $V/hp_vpu_vrf_banked.sv $V/hp_vpu_reduction.sv $V/deps/hp_vpu_kernel_engine.sv \
+            $V/hp_vpu_top.sv \
+            $V/hpml_tile_bridge.sv $V/bind_tile.sv \
             --Mdir /tmp/m5 -o tb tb/tb_m5_program.sv > /tmp/m5.build.log 2>&1
           echo "build exit=$?" > /tmp/m5.rc
           [ -x /tmp/m5/tb ] && echo "EXECUTABLE BUILT" >> /tmp/m5.rc
