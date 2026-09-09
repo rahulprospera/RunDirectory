@@ -93,7 +93,12 @@ jobs:
           cd src
           mkdir -p /tmp/vb
           printf '    .section .text.init\n    .globl _start\n_start:\n    li sp, 0x00007000\n    call main\n    li t0, 0x50000000\n    sw zero, 0(t0)\n1:  j 1b\n' > /tmp/vb/orch_start.S
-          riscv64-unknown-elf-gcc -march=${{ inputs.march }} -mabi=ilp32 -O2 -nostdlib \
+          # NO 'C' HERE, deliberately. The one-tool job above proves the realistic host ISA
+          # (rv32imac_zve32x) compiles; this job EXECUTES the image on a scalar shim that decodes
+          # 32-bit instructions only, and at -march=...c the compiler emits 35 compressed ones.
+          # Dropping C changes nothing about the tile -- Zve32x does not mandate it -- and keeps
+          # the shim small enough to stay obviously correct.
+          riscv64-unknown-elf-gcc -march=rv32im_zve32x -mabi=ilp32 -O2 -nostdlib \
             -nostartfiles -ffreestanding -T sw/tile_driver/link.ld -Isw/orchestrator \
             -o /tmp/vb/orch.elf /tmp/vb/orch_start.S sw/orchestrator/orchestrate.c
           riscv64-unknown-elf-objcopy -O binary /tmp/vb/orch.elf /tmp/vb/orch.bin
