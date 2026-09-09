@@ -53,8 +53,9 @@ jobs:
           echo "vpu config generated"
       - name: Drop my host program into their progs flow
         run: |
-          cp tile/sw/core_host/keytile.c core/rtl/tb/progs/keytile.c
-          echo "keytile.c staged"
+          cp core/rtl/tb/progs/p1_straight.c /tmp/p1_original.c
+          cp tile/sw/core_host/keytile.c core/rtl/tb/progs/p1_straight.c
+          echo "host program staged into p1_straight's slot (their list is fixed at 5 names)"
       - name: Config + program images
         run: |
           export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
@@ -100,7 +101,7 @@ jobs:
         run: |
           cd core/rtl
           set +e
-          timeout 2400 /tmp/m5/tb +prog=0 > /tmp/m5.run.log 2>&1
+          timeout 2400 /tmp/m5/tb +prog=1 > /tmp/m5.run.log 2>&1
           echo "run exit=$?" > /tmp/m5.runrc
       - name: Run verdict — ALLOWLIST ONLY
         run: |
