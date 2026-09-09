@@ -314,6 +314,9 @@ jobs:
         run: |
           grep -E "^=== command processor|^  \[A\]|^  \[B\]|^  CP\[|^tb_cmdproc_gemv: pass=|^  cycle delta" /tmp/cp.log \
             || echo "no verdict line produced"
+          echo "--- all three engine classes, one ring ---"
+          grep -E "^=== minimum viable|^    SKU |^  \[A\]|^  \[B\]|^  CP\[|^tb_cmdproc_system: pass=|::error::" /tmp/cps.log \
+            || echo "no system verdict line produced"
           cat /tmp/cp.rc; grep -q "exit=0" /tmp/cp.rc || exit 1
       - name: Failure triage (allowlisted; RTL-shaped lines stripped)
         if: failure()
