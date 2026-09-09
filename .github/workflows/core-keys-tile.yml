@@ -48,8 +48,8 @@ jobs:
           git clone --depth 1 --branch hp-vpu-pipe-verif \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" tile 2>te.txt
           [ $? -eq 0 ] && echo "tile checkout ok" || { echo "tile checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' te.txt; exit 1; }
-          python3 tile/scripts/gen_systemc_pkg_hp_vpu_3_0.py --sku DLEN256_GPU_FAB \
-            --out tile/generated/hp_vpu_3_0_config.h >/dev/null
+          ( cd tile && python3 scripts/gen_systemc_pkg_hp_vpu_3_0.py --sku DLEN256_GPU_FAB \
+              --out generated/hp_vpu_3_0_config.h ) >/dev/null
           echo "vpu config generated"
       - name: Drop my host program into their progs flow
         run: |
@@ -80,7 +80,6 @@ jobs:
             -y prim -y atoms -y leaves -y cluster -y tb \
             -y $V -y $V/deps \
             +incdir+$V/deps +incdir+$GITHUB_WORKSPACE/tile/generated \
-            -GLUT_MEM=\"$V/mem/lut_rom.mem\" \
             $GITHUB_WORKSPACE/tile/generated/hp_vpu_3_0_config_pkg.sv \
             $V/deps/hp_vpu_pkg.sv $V/hpml_tile_bridge.sv $V/bind_tile.sv \
             --Mdir /tmp/m5 -o tb tb/tb_m5_program.sv > /tmp/m5.build.log 2>&1
