@@ -70,3 +70,49 @@ jobs:
             || echo "NOTE: this clang has no riscv target or rejected the ISA string — see the log above"
           grep -q "gcc exit=0" /tmp/gcc.rc || { echo "VERDICT: FAIL — even GCC did not build it"; exit 1; }
           exit $rc
+
+  runs-on-rtl:
+    # Compiling is half the claim. This runs the compiled image AT the tile: vector
+    # instructions and MMIO stores land on real RTL, scalar is a modelled shim.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache python3 python3-pip gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>ce.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' ce.txt; exit 1; }
+      - name: Build the program image
+        run: |
+          cd src
+          mkdir -p /tmp/vb
+          printf '    .section .text.init\n    .globl _start\n_start:\n    li sp, 0x00007000\n    call main\n    li t0, 0x50000000\n    sw zero, 0(t0)\n1:  j 1b\n' > /tmp/vb/orch_start.S
+          riscv64-unknown-elf-gcc -march=${{ inputs.march }} -mabi=ilp32 -O2 -nostdlib \
+            -nostartfiles -ffreestanding -T sw/tile_driver/link.ld -Isw/orchestrator \
+            -o /tmp/vb/orch.elf /tmp/vb/orch_start.S sw/orchestrator/orchestrate.c
+          riscv64-unknown-elf-objcopy -O binary /tmp/vb/orch.elf /tmp/vb/orch.bin
+          echo "image: $(wc -c < /tmp/vb/orch.bin) bytes, $(riscv64-unknown-elf-objdump -d /tmp/vb/orch.elf | grep -cE '^\s+[0-9a-f]+:' || true) instructions"
+      - name: Run it at the tile
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src
+          set +e
+          SKU=DLEN256_GPU_FAB HARNESS=tb_orchestrate.cpp TOP_OBJ=/tmp/vb/orch BUILD_JOBS="$(nproc)" \
+            ORCH_BIN=/tmp/vb/orch.bin bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/o.log 2>&1
+          echo "exit=$?" > /tmp/o.rc
+      - name: Verdict — ALLOWLIST ONLY
+        run: |
+          grep -E "^=== the compiled|^    scalar:|^  reference|^  loaded|^  program stopped|^  it issued|^tb_orchestrate: pass=|::error::" /tmp/o.log \
+            || echo "no verdict line produced"
+          cat /tmp/o.rc; grep -q "exit=0" /tmp/o.rc || exit 1
+      - name: Failure triage (allowlisted)
+        if: failure()
+        run: |
+          [ -f /tmp/o.log ] && tail -40 /tmp/o.log | grep -viE '\.sv\b|verilator |\+incdir|--Mdir|-y |rtl/' | tail -15
+          grep -oE "(error:|No such file|undefined reference|Segmentation fault|BUILD FAILED|Error [0-9]+)[^/]{0,70}" /tmp/o.log 2>/dev/null | head -6 || true
