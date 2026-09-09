@@ -11,7 +11,11 @@ on:
   workflow_dispatch:
     inputs:
       branch: { description: 'hp_ml_core branch', default: 'rtl-timing-2' }
-      width:  { description: 'issue_width', default: '1' }
+      # DEFAULT TO THEIR SHIPPED CONFIG. W=1 was a build-convenience choice that quietly
+      # changed the machine: single-issue caps descriptor building at one store per cycle,
+      # so the banked-LS / MSHR throughput argument cannot be exercised at all. Their
+      # rtl_core.json ships issue_width=2; run what they ship.
+      width:  { description: 'issue_width (their shipped default is 2)', default: '2' }
 permissions: { contents: read }
 concurrency: { group: core-keys-tile, cancel-in-progress: false }
 jobs:
