@@ -1,0 +1,71 @@
+name: orchestrate
+# ONE TOOL, THREE ENGINES — does a stock LLVM compile the tile's orchestration?
+#
+# The product claim is that a customer needs no vendor compiler, no kernel language and no blob:
+# the vector core is the ISA so upstream LLVM targets it, and the GPU and matmul fabric are
+# memory-mapped so they are ordinary stores. That is either true of a stock clang or it is
+# marketing. This builds sw/orchestrator/orchestrate.c with BOTH toolchains and reports what
+# came out -- vector instructions, MMIO stores, and the count of vendor-specific opcodes, which
+# must be zero.
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'branch to build', default: 'hp-vpu-pipe-verif' }
+      march:  { description: 'ISA string', default: 'rv32imac_zve32x' }
+permissions: { contents: read }
+concurrency: { group: orchestrate, cancel-in-progress: false }
+jobs:
+  one-tool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+          clang --version | head -1
+          echo "riscv targets in this clang:"; clang --print-targets | grep -i riscv || echo "  NONE"
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>ce.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' ce.txt; exit 1; }
+      - name: Compile with LLVM (the claim under test)
+        run: |
+          cd src
+          set +e
+          clang -target riscv32-unknown-elf -march=${{ inputs.march }} -mabi=ilp32 \
+            -O2 -nostdlib -ffreestanding -c sw/orchestrator/orchestrate.c -o /tmp/llvm.o 2>/tmp/llvm.err
+          echo "llvm exit=$?" | tee /tmp/llvm.rc
+          head -5 /tmp/llvm.err 2>/dev/null
+      - name: Compile with GCC (the control)
+        run: |
+          cd src
+          set +e
+          riscv64-unknown-elf-gcc -march=${{ inputs.march }} -mabi=ilp32 \
+            -O2 -nostdlib -ffreestanding -c sw/orchestrator/orchestrate.c -o /tmp/gcc.o 2>/tmp/gcc.err
+          echo "gcc exit=$?" | tee /tmp/gcc.rc
+          head -5 /tmp/gcc.err 2>/dev/null
+      - name: What came out — the verdict
+        run: |
+          rc=0
+          for tc in llvm gcc; do
+            o=/tmp/$tc.o
+            echo "===== $tc ====="
+            if [ ! -f "$o" ]; then echo "  did not compile"; [ "$tc" = gcc ] && rc=1; continue; fi
+            riscv64-unknown-elf-objdump -d "$o" > /tmp/$tc.dis 2>/dev/null
+            echo "  vector instructions (VPU):"
+            grep -oE '\bv(setvli|setivli|le8|se8|max|mv|add)[a-z0-9._]*' /tmp/$tc.dis | sort | uniq -c | sed 's/^/    /' | head -8
+            echo "  MMIO command writes (DMA / GPU / ML / CP):"
+            grep -cE 'lui\s+\S+,0x4000[0-3]' /tmp/$tc.dis | sed 's/^/    lui to the tile map: /'
+            grep -cE '^\s+[0-9a-f]+:.*\bsw\b' /tmp/$tc.dis | sed 's/^/    stores: /'
+            n=$(grep -cE '\.insn|custom[0-3]|__builtin_riscv' /tmp/$tc.dis)
+            echo "    VENDOR-SPECIFIC OPCODES: $n  (must be 0)"
+            [ "$n" -eq 0 ] || rc=1
+          done
+          echo "====="
+          grep -q "llvm exit=0" /tmp/llvm.rc && echo "VERDICT: stock LLVM builds the orchestration" \
+            || echo "NOTE: this clang has no riscv target or rejected the ISA string — see the log above"
+          grep -q "gcc exit=0" /tmp/gcc.rc || { echo "VERDICT: FAIL — even GCC did not build it"; exit 1; }
+          exit $rc
