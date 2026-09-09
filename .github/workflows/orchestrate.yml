@@ -48,6 +48,7 @@ jobs:
           echo "gcc exit=$?" | tee /tmp/gcc.rc
           head -5 /tmp/gcc.err 2>/dev/null
       - name: What came out — the verdict
+        shell: bash {0}          # NOT -e: grep -c returns 1 on zero matches, which is the PASS case
         run: |
           rc=0
           for tc in llvm gcc; do
@@ -58,9 +59,9 @@ jobs:
             echo "  vector instructions (VPU):"
             grep -oE '\bv(setvli|setivli|le8|se8|max|mv|add)[a-z0-9._]*' /tmp/$tc.dis | sort | uniq -c | sed 's/^/    /' | head -8
             echo "  MMIO command writes (DMA / GPU / ML / CP):"
-            grep -cE 'lui\s+\S+,0x4000[0-3]' /tmp/$tc.dis | sed 's/^/    lui to the tile map: /'
-            grep -cE '^\s+[0-9a-f]+:.*\bsw\b' /tmp/$tc.dis | sed 's/^/    stores: /'
-            n=$(grep -cE '\.insn|custom[0-3]|__builtin_riscv' /tmp/$tc.dis)
+            echo "    lui to the tile map: $(grep -cE 'lui\s+\S+,0x4000[0-3]' /tmp/$tc.dis || true)"
+            echo "    stores: $(grep -cE '^\s+[0-9a-f]+:.*\bsw\b' /tmp/$tc.dis || true)"
+            n=$(grep -cE '\.insn|custom[0-3]|__builtin_riscv' /tmp/$tc.dis || true); n=${n:-0}
             echo "    VENDOR-SPECIFIC OPCODES: $n  (must be 0)"
             [ "$n" -eq 0 ] || rc=1
           done
