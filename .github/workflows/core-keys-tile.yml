@@ -1,4 +1,4 @@
-name: core-runs
+name: core-keys-tile
 # Does hpml_core, the REAL core, build as a composed machine and execute a program?
 #
 # Every other hp_ml_core workflow here builds a unit bench. Those are green, which says the
@@ -13,7 +13,7 @@ on:
       branch: { description: 'hp_ml_core branch', default: 'rtl-timing-2' }
       width:  { description: 'issue_width', default: '1' }
 permissions: { contents: read }
-concurrency: { group: core-runs, cancel-in-progress: false }
+concurrency: { group: core-keys-tile, cancel-in-progress: false }
 jobs:
   composed-machine:
     runs-on: ubuntu-latest
@@ -42,6 +42,19 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" core 2>ce.txt
           [ $? -eq 0 ] && echo "core checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' ce.txt; exit 1; }
+      - name: Checkout PRIVATE tile (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch hp-vpu-pipe-verif \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" tile 2>te.txt
+          [ $? -eq 0 ] && echo "tile checkout ok" || { echo "tile checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' te.txt; exit 1; }
+          python3 tile/scripts/gen_systemc_pkg_hp_vpu_3_0.py --sku DLEN256_GPU_FAB \
+            --out tile/generated/hp_vpu_3_0_config.h >/dev/null
+          echo "vpu config generated"
+      - name: Drop my host program into their progs flow
+        run: |
+          cp tile/sw/core_host/keytile.c core/rtl/tb/progs/keytile.c
+          echo "keytile.c staged"
       - name: Config + program images
         run: |
           export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
@@ -61,8 +74,15 @@ jobs:
           export PATH=/opt/verilator/bin:$PATH
           cd core/rtl
           set +e
+          V=$GITHUB_WORKSPACE/tile/rtl/engines/hp_vpu_3_0
           verilator --binary --timing -Wall -Wno-fatal -j 1 --top-module tb_m5_program \
+            -Wno-PINMISSING -Wno-PINCONNECTEMPTY -Wno-WIDTH -Wno-UNUSED -Wno-DECLFILENAME \
             -y prim -y atoms -y leaves -y cluster -y tb \
+            -y $V -y $V/deps \
+            +incdir+$V/deps +incdir+$GITHUB_WORKSPACE/tile/generated \
+            -GLUT_MEM=\"$V/mem/lut_rom.mem\" \
+            $GITHUB_WORKSPACE/tile/generated/hp_vpu_3_0_config_pkg.sv \
+            $V/deps/hp_vpu_pkg.sv $V/hpml_tile_bridge.sv $V/bind_tile.sv \
             --Mdir /tmp/m5 -o tb tb/tb_m5_program.sv > /tmp/m5.build.log 2>&1
           echo "build exit=$?" > /tmp/m5.rc
           [ -x /tmp/m5/tb ] && echo "EXECUTABLE BUILT" >> /tmp/m5.rc
@@ -80,7 +100,11 @@ jobs:
           echo "run exit=$?" > /tmp/m5.runrc
       - name: Run verdict — ALLOWLIST ONLY
         run: |
-          grep -iE "self-test|retired|answer|IPC|cycles" /tmp/m5.run.log | head -6 || echo "no verdict line"
+          echo "--- did the host key the engines? ---"
+          grep -aE "\[bridge\]|hpml_tile_bridge|launches total|raster \(GPU\)|gemv   \(FABRIC\)|::error::" \
+            /tmp/m5.run.log | head -14 || echo "  no bridge output"
+          echo "--- their own gate, unchanged ---"
+          grep -iE "self-test|retired|answer|IPC" /tmp/m5.run.log | head -4 || echo "  no verdict line"
           cat /tmp/m5.runrc
           grep -icE "^ *FAIL|ERROR" /tmp/m5.run.log | sed 's/^/FAIL-or-ERROR lines: /' || true
       - name: Failure triage (allowlisted; RTL-shaped lines stripped)
