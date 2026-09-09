@@ -285,3 +285,40 @@ jobs:
             /tmp/vb/skyrun_out.txt
             /tmp/vb/skyrun_cfg.txt
           retention-days: 7
+
+  cmdproc:
+    # Independent of the sky pipeline: a short bench, so it gets its own job rather than
+    # riding on a 25-minute render.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3 python3-pip
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" src 2>clone_err.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - name: Command processor vs hand-driven host
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          mkdir -p /tmp/vb
+          cd src
+          set +e
+          SKU=$SKU HARNESS=tb_cmdproc_gemv.cpp TOP_OBJ=/tmp/vb/cp_fab BUILD_JOBS="$(nproc)" \
+            bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/cp.log 2>&1
+          echo "exit=$?" > /tmp/cp.rc
+      - name: Verdict — ALLOWLIST ONLY
+        run: |
+          grep -E "^=== command processor|^  \[A\]|^  \[B\]|^  CP\[|^tb_cmdproc_gemv: pass=|^  cycle delta" /tmp/cp.log \
+            || echo "no verdict line produced"
+          cat /tmp/cp.rc; grep -q "exit=0" /tmp/cp.rc || exit 1
+      - name: Failure triage (allowlisted; RTL-shaped lines stripped)
+        if: failure()
+        run: |
+          [ -f /tmp/cp.log ] && tail -40 /tmp/cp.log \
+            | grep -viE '\.sv\b|verilator |\+incdir|--Mdir|-y |rtl/' | tail -15
+          grep -oE "(error:|No such file|Permission denied|command not found|Segmentation fault|BUILD FAILED|Error [0-9]+)[^/]{0,70}" \
+            /tmp/cp.log 2>/dev/null | head -6 || true
