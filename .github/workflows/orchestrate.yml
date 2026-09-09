@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Toolchains
         run: |
-          sudo apt-get update -qq
+          sudo rm -f /etc/apt/sources.list.d/*google* /etc/apt/sources.list.d/*chrome* /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true; sudo apt-get update -qq || sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
           clang --version | head -1
           echo "riscv targets in this clang:"; clang --print-targets | grep -i riscv || echo "  NONE"
@@ -80,7 +80,7 @@ jobs:
       - uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
       - run: |
-          sudo apt-get update -qq
+          sudo rm -f /etc/apt/sources.list.d/*google* /etc/apt/sources.list.d/*chrome* /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true; sudo apt-get update -qq || sudo apt-get update -qq
           sudo apt-get install -y -qq ccache python3 python3-pip gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
       - name: Checkout PRIVATE repo (token masked)
         run: |
