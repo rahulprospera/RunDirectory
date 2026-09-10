@@ -100,8 +100,10 @@ jobs:
             $V/hp_vpu_top.sv $V/hpml_tile_bridge.sv \
             --Mdir /tmp/loop -o loop tb/tb_hpml_system.sv > /tmp/loop.build.log 2>&1
           echo "loop build exit=$?" > /tmp/loop.rc
-          [ -x /tmp/loop/loop ] && echo "LOOP BUILT" >> /tmp/loop.rc
+          [ -x /tmp/loop/loop ] && echo "LOOP BUILT" >> /tmp/loop.rc || true
       - name: Loop verdict — ALLOWLIST ONLY
+        if: always()
+        shell: bash {0}
         run: |
           cat /tmp/loop.rc
           if grep -q "LOOP BUILT" /tmp/loop.rc; then
@@ -135,7 +137,7 @@ jobs:
             $V/hpml_tile_bridge.sv $V/bind_tile.sv \
             --Mdir /tmp/m5 -o tb tb/tb_m5_program.sv > /tmp/m5.build.log 2>&1
           echo "build exit=$?" > /tmp/m5.rc
-          [ -x /tmp/m5/tb ] && echo "EXECUTABLE BUILT" >> /tmp/m5.rc
+          [ -x /tmp/m5/tb ] && echo "EXECUTABLE BUILT" >> /tmp/m5.rc || true
       - name: Build verdict
         run: |
           cat /tmp/m5.rc
@@ -152,7 +154,7 @@ jobs:
         run: |
           echo "--- did the host key the engines? ---"
           grep -aE "\[bridge\]|hpml_tile_bridge|launches total|raster \(GPU\)|gemv   \(FABRIC\)|::error::" \
-            /tmp/m5.run.log | head -14 || echo "  no bridge output"
+            /tmp/m5.run.log | head -40 || echo "  no bridge output"
           echo "--- their own gate, unchanged ---"
           grep -iE "self-test|retired|answer|IPC" /tmp/m5.run.log | head -4 || echo "  no verdict line"
           cat /tmp/m5.runrc
