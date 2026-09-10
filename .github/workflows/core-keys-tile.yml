@@ -58,7 +58,7 @@ jobs:
       - name: Drop my host program into their progs flow
         run: |
           cp core/rtl/tb/progs/p1_straight.c /tmp/p1_original.c
-          cp tile/sw/core_host/keytile.c core/rtl/tb/progs/p1_straight.c
+          cp tile/sw/core_host/keytile_launch.c core/rtl/tb/progs/p1_straight.c
           echo "host program staged into p1_straight's slot (their list is fixed at 5 names)"
       - name: Config + program images
         run: |
@@ -81,6 +81,14 @@ jobs:
           cp /tmp/hpml_system.sv core/rtl/cluster/hpml_system.sv
           cp tile/verilator/tb_hpml_system.sv core/rtl/tb/tb_hpml_system.sv
           wc -l core/rtl/cluster/hpml_system.sv | awk '{print "container: "$1" lines"}'
+      - name: Build the LOOP program image
+        run: |
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
+          cd core/rtl
+          cp $GITHUB_WORKSPACE/tile/sw/core_host/keytile_loop.c tb/progs/p2_loop.c
+          bash tb/progs/build.sh p2_loop >/dev/null 2>&1 || true
+          ls -la tb/progs/build/p2_loop.hex 2>/dev/null | awk '{print "loop image: "$5" bytes"}' \
+            || echo "loop image: NOT BUILT"
       - name: Build THE LOOP — core + memory + tile in one container
         run: |
           export PATH=/opt/verilator/bin:$PATH
@@ -108,14 +116,20 @@ jobs:
           cat /tmp/loop.rc
           if grep -q "LOOP BUILT" /tmp/loop.rc; then
             cd core/rtl
-            timeout 1800 /tmp/loop/loop +hex=tb/progs/build/p1_straight.hex > /tmp/loop.run.log 2>&1
+            timeout 1800 /tmp/loop/loop +hex=tb/progs/build/p2_loop.hex > /tmp/loop.run.log 2>&1
             echo "loop run exit=$?"
             grep -aE "\[bridge\]|=== tb_hpml_system|program finished|answer read back|launches total|raster \(GPU|gemv   |::error::" \
               /tmp/loop.run.log | head -16 || echo "  no loop output"
           else
-            echo "container did not build — see triage"
-            tail -40 /tmp/loop.build.log | grep -viE '\.sv:|verilator |\+incdir|--Mdir|-y |%Warning' | tail -14
-            grep -oE "(%Error[^:]*:|Cannot find|No such file)[^/]{0,90}" /tmp/loop.build.log | sort -u | head -8
+            echo "container did not build — the errors, deduplicated by KIND:"
+            # Their file paths are RTL-shaped and must not reach a public log, so strip the
+            # location and keep the message. A count tells you nothing; the kinds tell you what
+            # to fix.
+            grep -aoE "%Error[-A-Z]*: [^:]*: ?[0-9]*: ?(.*)" /tmp/loop.build.log \
+              | sed -E 's#[^ ]*/[^ ]*\.sv##g; s/[0-9]+:[0-9]+//g' \
+              | sed -E 's/^%Error[-A-Z]*: *//' | sort | uniq -c | sort -rn | head -14
+            echo "--- first three in full, paths stripped ---"
+            grep -aE "^%Error" /tmp/loop.build.log | sed -E 's#[^ ]*/##g' | head -3
           fi
       - name: Build tb_m5_program — THE COMPOSED MACHINE
         run: |
