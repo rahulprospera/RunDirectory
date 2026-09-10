@@ -74,6 +74,47 @@ jobs:
           echo "mul_lat=$(python3 -c "import json;print(json.load(open('config/rtl_core.json'))['rtl_only']['mul_lat'])")"
           for s in tb/progs/build*.sh; do [ -e "$s" ] && bash "$s" >/dev/null 2>&1; done
           echo "program images: $(ls tb/progs/build/*.hex 2>/dev/null | wc -l)"
+      - name: Generate the system container from the core's port list
+        run: |
+          python3 tile/scripts/hp_vpu_3_0/gen_hpml_system.py \
+            core/rtl/cluster/hpml_core.sv /tmp/hpml_system.sv
+          cp /tmp/hpml_system.sv core/rtl/cluster/hpml_system.sv
+          cp tile/verilator/tb_hpml_system.sv core/rtl/tb/tb_hpml_system.sv
+          wc -l core/rtl/cluster/hpml_system.sv | awk '{print "container: "$1" lines"}'
+      - name: Build THE LOOP — core + memory + tile in one container
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd core/rtl
+          V=$GITHUB_WORKSPACE/tile/rtl/engines/hp_vpu_3_0
+          set +e
+          verilator --binary --timing -Wall -Wno-fatal -j 1 --top-module tb_hpml_system \
+            -Wno-PINMISSING -Wno-PINCONNECTEMPTY -Wno-WIDTH -Wno-UNUSED -Wno-DECLFILENAME \
+            -Wno-SELRANGE -Wno-CASEINCOMPLETE -Wno-IMPLICIT -Wno-BLKANDNBLK \
+            -y prim -y atoms -y leaves -y cluster -y tb -y $V -y $V/deps \
+            +incdir+$V/deps +incdir+$GITHUB_WORKSPACE/tile/generated \
+            $GITHUB_WORKSPACE/tile/generated/hp_vpu_3_0_config_pkg.sv \
+            $V/deps/hp_vpu_pkg.sv \
+            $V/hp_vpu_red_pair.sv $V/hp_vpu_pp_add.sv $V/hp_vpu_lut_rom.sv \
+            $V/hp_vpu_decode.sv $V/hp_vpu_csr.sv $V/hp_vpu_hazard.sv $V/hp_vpu_sequencer.sv \
+            $V/hp_vpu_vrf_banked.sv $V/hp_vpu_reduction.sv $V/deps/hp_vpu_kernel_engine.sv \
+            $V/hp_vpu_top.sv $V/hpml_tile_bridge.sv \
+            --Mdir /tmp/loop -o loop tb/tb_hpml_system.sv > /tmp/loop.build.log 2>&1
+          echo "loop build exit=$?" > /tmp/loop.rc
+          [ -x /tmp/loop/loop ] && echo "LOOP BUILT" >> /tmp/loop.rc
+      - name: Loop verdict — ALLOWLIST ONLY
+        run: |
+          cat /tmp/loop.rc
+          if grep -q "LOOP BUILT" /tmp/loop.rc; then
+            cd core/rtl
+            timeout 1800 /tmp/loop/loop +hex=tb/progs/build/p1_straight.hex > /tmp/loop.run.log 2>&1
+            echo "loop run exit=$?"
+            grep -aE "\[bridge\]|=== tb_hpml_system|program finished|answer read back|launches total|raster \(GPU|gemv   |::error::" \
+              /tmp/loop.run.log | head -16 || echo "  no loop output"
+          else
+            echo "container did not build — see triage"
+            tail -40 /tmp/loop.build.log | grep -viE '\.sv:|verilator |\+incdir|--Mdir|-y |%Warning' | tail -14
+            grep -oE "(%Error[^:]*:|Cannot find|No such file)[^/]{0,90}" /tmp/loop.build.log | sort -u | head -8
+          fi
       - name: Build tb_m5_program — THE COMPOSED MACHINE
         run: |
           export PATH=/opt/verilator/bin:$PATH
