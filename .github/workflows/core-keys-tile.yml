@@ -118,8 +118,16 @@ jobs:
             cd core/rtl
             timeout 1800 /tmp/loop/loop +hex=tb/progs/build/p2_loop.hex > /tmp/loop.run.log 2>&1
             echo "loop run exit=$?"
-            grep -aE "\[bridge\]|=== tb_hpml_system|program finished|answer read back|launches total|raster \(GPU|gemv   |::error::" \
-              /tmp/loop.run.log | head -16 || echo "  no loop output"
+            # The store trace is long and the SUMMARY is at the end -- head -16 showed 16 ACT
+            # stores and none of the result. Print the summary first, then a sample of the trace.
+            echo "--- the loop ---"
+            grep -aE "=== tb_hpml_system|program finished|answer read back|keyed the|launches total|raster \(GPU|gemv   |::error::" \
+              /tmp/loop.run.log || echo "  no summary produced"
+            echo "--- stores seen (first 4, last 6) ---"
+            grep -a "\[bridge\] store" /tmp/loop.run.log | head -4
+            grep -a "\[bridge\] store" /tmp/loop.run.log | tail -6
+            echo "--- store count by target register ---"
+            grep -a "\[bridge\] store" /tmp/loop.run.log | grep -oE "addr=[0-9a-f]+" | sort | uniq -c
           else
             echo "container did not build — the errors, deduplicated by KIND:"
             # Their file paths are RTL-shaped and must not reach a public log, so strip the
