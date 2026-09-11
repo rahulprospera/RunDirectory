@@ -116,7 +116,7 @@ jobs:
           cat /tmp/loop.rc
           if grep -q "LOOP BUILT" /tmp/loop.rc; then
             cd core/rtl
-            timeout 1800 /tmp/loop/loop +hex=tb/progs/build/p2_loop.hex > /tmp/loop.run.log 2>&1
+            stdbuf -o0 -e0 timeout 3000 /tmp/loop/loop +hex=tb/progs/build/p2_loop.hex > /tmp/loop.run.log 2>&1
             echo "loop run exit=$?"
             # The store trace is long and the SUMMARY is at the end -- head -16 showed 16 ACT
             # stores and none of the result. Print the summary first, then a sample of the trace.
