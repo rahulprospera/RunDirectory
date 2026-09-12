@@ -123,6 +123,15 @@ jobs:
             echo "--- the loop ---"
             grep -aE "=== tb_hpml_system|program finished|answer read back|keyed the|launches total|raster \(GPU|gemv   |::error::" \
               /tmp/loop.run.log || echo "  no summary produced"
+            # THE DIAGNOSTICS. Added to the testbench to tell a wedged core from one running the
+            # wrong code from one merely slow -- and then not printed, because this filter only
+            # matched the summary. A trace nobody prints is not a trace.
+            echo "--- is the core executing? (first stores at any address) ---"
+            grep -a "\[st\]" /tmp/loop.run.log | head -12 || echo "  NO STORES AT ALL"
+            echo "--- is the fetch PC advancing? ---"
+            grep -a "\[pc\]" /tmp/loop.run.log | head -8 || echo "  no pc trace"
+            echo "--- how far did it get? ---"
+            tail -3 /tmp/loop.run.log
             echo "--- stores seen (first 4, last 6) ---"
             grep -a "\[bridge\] store" /tmp/loop.run.log | head -4
             grep -a "\[bridge\] store" /tmp/loop.run.log | tail -6
