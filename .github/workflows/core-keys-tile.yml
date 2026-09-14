@@ -59,10 +59,15 @@ jobs:
       - name: Drop my host program into their progs flow
         run: |
           cp core/rtl/tb/progs/p1_straight.c /tmp/p1_original.c
+          # build.sh runs spike to derive its oracle and needs the cross-compiler; this step
+          # did not have either on PATH, and 2>/dev/null hid the failure so the images came
+          # out empty and the run had nothing to execute.
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
           for P in ${{ inputs.progs }}; do
             cp "tile/sw/core_host/$P.c" "core/rtl/tb/progs/p1_straight.c"
-            ( cd core/rtl && bash tb/progs/build.sh p1_straight >/dev/null 2>&1 \
-              && cp tb/progs/build/p1_straight.hex "tb/progs/build/$P.hex" ) || true
+            ( cd core/rtl && bash tb/progs/build.sh p1_straight > /tmp/build_$P.log 2>&1 \
+              && cp tb/progs/build/p1_straight.hex "tb/progs/build/$P.hex" ) \
+              || { echo "  $P: build.sh FAILED"; tail -4 /tmp/build_$P.log | sed 's#[^ ]*/##g'; }
             echo "  image: $P -> $(ls -la core/rtl/tb/progs/build/$P.hex 2>/dev/null | awk '{print $5}') bytes"
           done
           echo "host program staged into p1_straight's slot (their list is fixed at 5 names)"
