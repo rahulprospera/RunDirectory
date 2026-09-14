@@ -10,7 +10,7 @@ name: core-keys-tile
 on:
   workflow_dispatch:
     inputs:
-      prog:   { description: 'host program: keytile | storetest', default: 'keytile' }
+      progs:  { description: 'space-separated host programs', default: 'keytile storetest' }
       branch: { description: 'hp_ml_core branch', default: 'rtl-timing-2' }
       # DEFAULT TO THEIR SHIPPED CONFIG. W=1 was a build-convenience choice that quietly
       # changed the machine: single-issue caps descriptor building at one store per cycle,
