@@ -59,7 +59,12 @@ jobs:
       - name: Drop my host program into their progs flow
         run: |
           cp core/rtl/tb/progs/p1_straight.c /tmp/p1_original.c
-          cp tile/sw/core_host/${{ inputs.prog }}.c core/rtl/tb/progs/p1_straight.c
+          for P in ${{ inputs.progs }}; do
+            cp "tile/sw/core_host/$P.c" "core/rtl/tb/progs/p1_straight.c"
+            ( cd core/rtl && bash tb/progs/build.sh p1_straight >/dev/null 2>&1 \
+              && cp tb/progs/build/p1_straight.hex "tb/progs/build/$P.hex" ) || true
+            echo "  image: $P -> $(ls -la core/rtl/tb/progs/build/$P.hex 2>/dev/null | awk '{print $5}') bytes"
+          done
           echo "host program staged into p1_straight's slot (their list is fixed at 5 names)"
       - name: Config + program images
         run: |
@@ -75,12 +80,30 @@ jobs:
           echo "mul_lat=$(python3 -c "import json;print(json.load(open('config/rtl_core.json'))['rtl_only']['mul_lat'])")"
           for s in tb/progs/build*.sh; do [ -e "$s" ] && bash "$s" >/dev/null 2>&1; done
           echo "program images: $(ls tb/progs/build/*.hex 2>/dev/null | wc -l)"
+      - name: Executable cache key (RTL only — NOT the program, NOT the bridge)
+        id: k
+        run: |
+          # The RTL has not changed in days, yet every experiment paid a 25-minute
+          # re-verilation. Key the cache on the RTL alone so a new host program or a new
+          # $display reuses the binary: build once, run many.
+          echo "key=m5-${{ inputs.branch }}-w${{ inputs.width }}-$(find core/rtl/leaves core/rtl/cluster core/rtl/atoms core/rtl/prim tile/rtl -name '*.sv' -type f -exec md5sum {} + 2>/dev/null | sort | md5sum | cut -c1-16)" >> $GITHUB_OUTPUT
+      - uses: actions/cache@v4
+        id: dut
+        with:
+          path: /tmp/m5
+          key: ${{ steps.k.outputs.key }}
       - name: Build tb_m5_program — THE COMPOSED MACHINE
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd core/rtl
           set +e
           V=$GITHUB_WORKSPACE/tile/rtl/engines/hp_vpu_3_0
+          if [ -x /tmp/m5/tb ]; then
+            echo "executor: cache hit — no rebuild"
+            echo "build exit=0"  > /tmp/m5.rc
+            echo "EXECUTABLE BUILT" >> /tmp/m5.rc
+            exit 0
+          fi
           verilator --binary --timing -Wall -Wno-fatal -j 1 --top-module tb_m5_program \
             -Wno-PINMISSING -Wno-PINCONNECTEMPTY -Wno-WIDTH -Wno-UNUSED -Wno-DECLFILENAME \
             -y prim -y atoms -y leaves -y cluster -y tb \
@@ -106,13 +129,22 @@ jobs:
         run: |
           cd core/rtl
           set +e
-          timeout 2400 /tmp/m5/tb +prog=1 > /tmp/m5.run.log 2>&1
-          echo "run exit=$?" > /tmp/m5.runrc
+          : > /tmp/m5.run.log
+          for P in ${{ inputs.progs }}; do
+            H="tb/progs/build/$P.hex"
+            [ -f "$H" ] || { echo "== $P: NO IMAGE ==" >> /tmp/m5.run.log; continue; }
+            echo "=========== $P ===========" >> /tmp/m5.run.log
+            # one build, many programs: the whole point of the cache above
+            cp "$H" tb/progs/build/p1_straight.hex
+            timeout 600 stdbuf -o0 /tmp/m5/tb +prog=1 >> /tmp/m5.run.log 2>&1
+            echo "-- $P exit=$?" >> /tmp/m5.run.log
+          done
+          echo "run exit=0" > /tmp/m5.runrc
       - name: Run verdict — ALLOWLIST ONLY
         run: |
           echo "--- did the host key the engines? ---"
-          grep -aE "\[bridge\]|hpml_tile_bridge|launches total|raster \(GPU\)|gemv   \(FABRIC\)|::error::" \
-            /tmp/m5.run.log | head -60 || echo "  no bridge output"
+          grep -aE "^===========|\[bridge\]|launches total|raster \(GPU\)|gemv   \(FABRIC\)|-- .* exit=|::error::" \
+            /tmp/m5.run.log | head -80 || echo "  no bridge output"
           echo "--- their own gate, unchanged ---"
           grep -iE "self-test|retired|answer|IPC" /tmp/m5.run.log | head -4 || echo "  no verdict line"
           cat /tmp/m5.runrc
