@@ -86,6 +86,13 @@ jobs:
             | grep -viE '\.sv\b|hp_vpu_[a-z_]+|verilator |\+incdir|--Mdir|-y |rtl/' | tail -20
           grep -oE "(error:|No such file|Permission denied|command not found|Segmentation fault|Assertion|BUILD FAILED|Error [0-9]+|make: \*\*\*)[^/]{0,70}" \
             /tmp/vqa.log 2>/dev/null | head -8 || true
+      - name: INDEPENDENT CHECK — a different program re-derives every answer
+        run: |
+          # The harness prints its own pass/fail, which is exactly what a sceptic should not have
+          # to accept. This runs a standard-library-only script over the run's own output files
+          # and recomputes clip8(sum W*a >> SHIFT) from scratch, then takes the argmax itself.
+          # It imports nothing from the RTL tree. Its verdict is the last line of this log.
+          python3 src/scripts/hp_vpu_3_0/verify_vqa.py /tmp/vb/vqa
       - uses: actions/upload-artifact@v4
         with:
           name: vqa
