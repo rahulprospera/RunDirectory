@@ -1,0 +1,95 @@
+name: vqa
+# PUBLIC runner-shell. No RTL or source lives here; the private repo is cloned at runtime with
+# RTL_RUN_TOKEN1 (masked, clone errors scrubbed).
+#
+# ONE JOB, deliberately: the model is fitted on the even frames inside the same process that
+# rendered them, so the frames cannot be sharded across runners the way sky-demo shards its
+# render. The whole sequence is ~3 Mcycles of RTL, which is minutes, not the 2 h the 48-frame
+# ISR render took.
+#
+# DISCLOSURE SURFACE — this log is world-readable: pass/fail counts, held-out accuracy, cycles.
+# NOT echoed: the build log (it carries the verilator command line = every RTL path and module
+# name), RTL source, or signal names.
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'private branch to run', default: 'hp-vpu-pipe-verif' }
+      nf:     { description: 'frames', default: '36' }
+      rain:   { description: 'rain streaks per frame', default: '110' }
+permissions: { contents: read }
+concurrency: { group: vqa, cancel-in-progress: false }
+env:
+  SKU: DLEN256_GPU_FAB
+  PRIV: rahulprospera/hp_vpu_ml_accelerator
+jobs:
+  vqa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check the private-repo tunnel is alive
+        run: |
+          set +e
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" HEAD >/dev/null 2>tok_err.txt
+          if [ $? -ne 0 ]; then
+            echo "::error title=RTL_RUN_TOKEN1 is dead::Mint a fine-grained PAT (Contents Read-only)"
+            sed -E 's#(https://)[^@]*@#\1***@#g' tok_err.txt | head -2; exit 1
+          fi
+          echo "tunnel ok"
+      - uses: actions/cache@v4
+        id: vc
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*google* /etc/apt/sources.list.d/*chrome* /etc/apt/sources.list.d/*microsoft* 2>/dev/null || true
+          sudo apt-get update -qq || sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+      - name: Checkout PRIVATE repo (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/${{ env.PRIV }}.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-vqa-${{ github.run_id }}
+          restore-keys: ccache-vqa-
+      - name: Render on the GPU, answer on the fabric
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          mkdir -p /tmp/vb
+          cd src
+          set +e
+          SKU=$SKU HARNESS=tb_vqa_scene.cpp TOP_OBJ=/tmp/vb/vqa BUILD_JOBS="$(nproc)" \
+            ISR_NF=${{ inputs.nf }} VQA_RAIN=${{ inputs.rain }} ISR_OUT=/tmp/vb/vqa \
+            bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/vqa.log 2>&1
+          echo "exit=$?" > /tmp/vqa.rc
+      - name: Verdict — ALLOWLIST ONLY
+        run: |
+          grep -E "^=== picture|^    SKU |^  \[gate |^  \[fit\]|^  frame [ 0-9]+  Q:|^=== RESULT|^  answers |^  raster  |^  inference|^tb_vqa_scene: pass=" /tmp/vqa.log \
+            || echo "no verdict line produced"
+          cat /tmp/vqa.rc; grep -q "exit=0" /tmp/vqa.rc || exit 1
+      - name: Failure triage (allowlisted; RTL-shaped lines stripped)
+        if: failure()
+        run: |
+          [ -f /tmp/vqa.log ] && tail -60 /tmp/vqa.log \
+            | grep -viE '\.sv\b|hp_vpu_[a-z_]+|verilator |\+incdir|--Mdir|-y |rtl/' | tail -20
+          grep -oE "(error:|No such file|Permission denied|command not found|Segmentation fault|Assertion|BUILD FAILED|Error [0-9]+|make: \*\*\*)[^/]{0,70}" \
+            /tmp/vqa.log 2>/dev/null | head -8 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vqa
+          path: |
+            /tmp/vb/vqa_f*.ppm
+            /tmp/vb/vqa_answers.txt
+          retention-days: 7
