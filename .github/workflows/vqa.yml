@@ -16,6 +16,8 @@ on:
       branch: { description: 'private branch to run', default: 'hp-vpu-pipe-verif' }
       nf:     { description: 'frames', default: '36' }
       rain:   { description: 'rain streaks per frame', default: '110' }
+      snap:   { description: 'frame to snapshot mid-raster (-1 = none)', default: '-1' }
+      snapn:  { description: 'how many snapshots of it', default: '48' }
 permissions: { contents: read }
 concurrency: { group: vqa, cancel-in-progress: false }
 env:
@@ -72,6 +74,7 @@ jobs:
           set +e
           SKU=$SKU HARNESS=tb_vqa_scene.cpp TOP_OBJ=/tmp/vb/vqa BUILD_JOBS="$(nproc)" \
             ISR_NF=${{ inputs.nf }} VQA_RAIN=${{ inputs.rain }} ISR_OUT=/tmp/vb/vqa \
+            VQA_SNAP_FRAME=${{ inputs.snap }} VQA_SNAP_N=${{ inputs.snapn }} \
             bash scripts/hp_vpu_3_0/build_top_v15_gentle.sh > /tmp/vqa.log 2>&1
           echo "exit=$?" > /tmp/vqa.rc
       - name: Verdict — ALLOWLIST ONLY
@@ -98,5 +101,9 @@ jobs:
           name: vqa
           path: |
             /tmp/vb/vqa_f*.ppm
+            /tmp/vb/vqa_s*.ppm
             /tmp/vb/vqa_answers.txt
+            /tmp/vb/vqa_model.txt
+            /tmp/vb/vqa_feat.txt
+            /tmp/vb/vqa_logits.txt
           retention-days: 7
