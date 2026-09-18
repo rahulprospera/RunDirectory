@@ -1,10 +1,12 @@
 name: tokencheck
-# Are the private-repo tokens alive? Ten seconds, no build, no RTL.
+# Are the private-repo tokens alive, and if not, WHICH failure is it?
 #
-# Every heavy workflow here opens with a tunnel check, which means a dead token is discovered
-# twenty minutes into a job instead of immediately -- and the error it produced last time
-# ("Write access not granted") named the wrong problem entirely. This answers the question on
-# its own, cheaply, so a token can be rotated and confirmed without burning a fleet.
+# "Invalid username or token" covers three different problems -- a token the API refuses, a token
+# the API accepts but which cannot see the repo, and a token that is fine but presented under a
+# username git will not take. They need different fixes, so this separates them. The API probe
+# answers the first two by status code; the URL matrix answers the third by trying each form.
+#
+# Nothing here prints a token. Only status codes and which form worked.
 on: { workflow_dispatch: {} }
 permissions: { contents: read }
 jobs:
@@ -12,23 +14,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: hp_vpu_ml_accelerator (RTL_RUN_TOKEN1)
+      - name: API probe — does the token exist, and can it see the repo?
+        env:
+          T1: ${{ secrets.RTL_RUN_TOKEN1 }}
+          TM: ${{ secrets.RTL_RUN_TOKEN_MLCORE }}
+        run: |
+          probe () {   # $1 = label, $2 = token, $3 = repo
+            code=$(curl -s -o /tmp/body.json -w '%{http_code}' \
+                   -H "Authorization: Bearer $2" -H "Accept: application/vnd.github+json" \
+                   "https://api.github.com/repos/$3")
+            case "$code" in
+              200) echo "  $1: 200 — the token is valid AND can see $3" ;;
+              401) echo "  $1: 401 — the token itself is refused (expired, revoked, or mangled on paste)" ;;
+              403) echo "  $1: 403 — valid token, but forbidden (owner approval, or SSO not authorised)" ;;
+              404) echo "  $1: 404 — valid token, but $3 is NOT in its repository access list" ;;
+              *)   echo "  $1: $code — unexpected" ;;
+            esac
+          }
+          echo "== which token, which problem =="
+          probe "TOKEN1      " "$T1" "rahulprospera/hp_vpu_ml_accelerator"
+          probe "TOKEN_MLCORE" "$TM" "rahulprospera/hp_ml_core"
+          # length only, never the value: catches a truncated or newline-padded paste
+          echo "  TOKEN_MLCORE length: ${#TM} chars (a fine-grained PAT is ~93, classic 40)"
+          case "$TM" in
+            github_pat_*) echo "  TOKEN_MLCORE prefix: fine-grained (github_pat_)" ;;
+            ghp_*)        echo "  TOKEN_MLCORE prefix: CLASSIC (ghp_)" ;;
+            ghs_*)        echo "  TOKEN_MLCORE prefix: app installation (ghs_)" ;;
+            *)            echo "  TOKEN_MLCORE prefix: unrecognised — likely mangled" ;;
+          esac
+      - name: git URL matrix — which username does git accept it under?
+        env:
+          TM: ${{ secrets.RTL_RUN_TOKEN_MLCORE }}
         run: |
           set +e
-          git ls-remote --heads \
-            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" \
-            >/tmp/a.txt 2>/tmp/ae.txt
-          if [ $? -eq 0 ]; then echo "TOKEN1 ok — $(wc -l </tmp/a.txt) branches visible"
-          else echo "::error title=RTL_RUN_TOKEN1 FAILED::$(sed -E 's#(https://)[^@]*@#\1***@#g' /tmp/ae.txt | head -2)"; fi
-      - name: hp_ml_core (RTL_RUN_TOKEN_MLCORE)
-        run: |
-          set +e
-          git ls-remote --heads \
-            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" \
-            >/tmp/b.txt 2>/tmp/be.txt
-          if [ $? -eq 0 ]; then echo "TOKEN_MLCORE ok — $(wc -l </tmp/b.txt) branches visible"
-          else echo "::error title=RTL_RUN_TOKEN_MLCORE FAILED::$(sed -E 's#(https://)[^@]*@#\1***@#g' /tmp/be.txt | head -2)"; fi
-      - name: Verdict
-        run: |
-          grep -q "TOKEN1 ok" <<<"$(cat /tmp/a.txt >/dev/null 2>&1; echo)" || true
-          [ -s /tmp/a.txt ] && [ -s /tmp/b.txt ] && echo "BOTH TUNNELS ALIVE" || { echo "at least one tunnel is dead"; exit 1; }
+          for user in x-access-token oauth2 rahulprospera git; do
+            git ls-remote --heads "https://$user:$TM@github.com/rahulprospera/hp_ml_core.git" \
+              >/tmp/o.txt 2>/dev/null
+            [ $? -eq 0 ] && echo "  $user: WORKS ($(wc -l </tmp/o.txt) branches)" || echo "  $user: refused"
+          done
+          # and with no username at all, which is the form fine-grained PATs prefer
+          git ls-remote --heads "https://$TM@github.com/rahulprospera/hp_ml_core.git" >/tmp/o.txt 2>/dev/null
+          [ $? -eq 0 ] && echo "  (token as username): WORKS ($(wc -l </tmp/o.txt) branches)" \
+                       || echo "  (token as username): refused"
