@@ -1,0 +1,34 @@
+name: tokencheck
+# Are the private-repo tokens alive? Ten seconds, no build, no RTL.
+#
+# Every heavy workflow here opens with a tunnel check, which means a dead token is discovered
+# twenty minutes into a job instead of immediately -- and the error it produced last time
+# ("Write access not granted") named the wrong problem entirely. This answers the question on
+# its own, cheaply, so a token can be rotated and confirmed without burning a fleet.
+on: { workflow_dispatch: {} }
+permissions: { contents: read }
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: hp_vpu_ml_accelerator (RTL_RUN_TOKEN1)
+        run: |
+          set +e
+          git ls-remote --heads \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" \
+            >/tmp/a.txt 2>/tmp/ae.txt
+          if [ $? -eq 0 ]; then echo "TOKEN1 ok — $(wc -l </tmp/a.txt) branches visible"
+          else echo "::error title=RTL_RUN_TOKEN1 FAILED::$(sed -E 's#(https://)[^@]*@#\1***@#g' /tmp/ae.txt | head -2)"; fi
+      - name: hp_ml_core (RTL_RUN_TOKEN_MLCORE)
+        run: |
+          set +e
+          git ls-remote --heads \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" \
+            >/tmp/b.txt 2>/tmp/be.txt
+          if [ $? -eq 0 ]; then echo "TOKEN_MLCORE ok — $(wc -l </tmp/b.txt) branches visible"
+          else echo "::error title=RTL_RUN_TOKEN_MLCORE FAILED::$(sed -E 's#(https://)[^@]*@#\1***@#g' /tmp/be.txt | head -2)"; fi
+      - name: Verdict
+        run: |
+          grep -q "TOKEN1 ok" <<<"$(cat /tmp/a.txt >/dev/null 2>&1; echo)" || true
+          [ -s /tmp/a.txt ] && [ -s /tmp/b.txt ] && echo "BOTH TUNNELS ALIVE" || { echo "at least one tunnel is dead"; exit 1; }
