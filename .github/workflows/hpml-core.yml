@@ -116,11 +116,17 @@ jobs:
           PY
           python3 flow/gen_rtl_config.py >/dev/null
           mkdir -p build/w
+          # *** W=4 IS THE MEMORY CORNER. ***  A composed W=4 elaboration peaks ~12 GB and the
+          # runner has 16; compiling with one g++ per core on top of that got the job KILLED
+          # ("the runner has received a shutdown signal", run 35527957238) -- it reads like an
+          # infrastructure flake and is really OOM.  W=1/W=2 are far smaller, so only W=4 is capped.
+          BJ=$(nproc); [ "${{ matrix.w }}" = "4" ] && BJ=2
+          echo "building W=${{ matrix.w }} with -j $BJ"
           # the same -Werror set full.sh uses: widths here are f(W), so a leaf whose parameter the
           # caller forgot is a HARD ERROR, not a warning.  That is what caught hpml_ls_stlfq at W=1.
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
-            -j "$(nproc)" --top-module tb_m5_program \
+            -j "$BJ" --top-module tb_m5_program \
             -y prim -y atoms -y leaves -y cluster -y tb \
             --Mdir build/w -o tb tb/tb_m5_program.sv
       - uses: actions/upload-artifact@v4
@@ -137,6 +143,11 @@ jobs:
   # seed x width combos are 9 runners.  Each builds its own programs (gcc+spike) for its seed.
   diff:
     needs: [tools, build]
+    # ⚠ NOT plain `needs`: one width's build failing used to skip EVERY seed x width combo, so a
+    # W=4 OOM hid the W=1 and W=2 differentials entirely (run 35527957238).  With !cancelled() the
+    # combos whose own width built still run; the ones whose artifact is missing fail on download,
+    # which is the honest signal, and fail-fast:false keeps them independent.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 80
     strategy:
@@ -189,6 +200,7 @@ jobs:
   # ---------------------------------------------------------------- directed kernels, per width
   directed:
     needs: [tools, build]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 80
     strategy: { fail-fast: false, matrix: { w: [1, 2, 4] } }
