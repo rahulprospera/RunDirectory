@@ -14,6 +14,10 @@ name: hpml-core
 # ⚠ EVERY JOB IS SIZED UNDER THE RUNTIME CAP.  Nothing here is one long step: a job that dies at the
 # wall is worth nothing, and `fail-fast: false` keeps one red shard from cancelling the rest.
 on:
+  # THE BASELINE RUNS ON ITS OWN.  Owner: "we need the baseline up and running" -- a gate nobody
+  # starts is a gate nobody has.  Daily, off the hour to dodge the scheduler stampede.
+  schedule:
+    - cron: '41 5 * * *'
   workflow_dispatch:
     inputs:
       branch: { description: 'hp_ml_core branch', default: 'rtl-leaves' }
@@ -94,6 +98,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy: { fail-fast: false, matrix: { w: [1, 2, 4] } }
+    # ⚠ W=4 IS EXPECTED TO FAIL TODAY AND MUST NOT HIDE W=1/W=2.  A composed W=4 elaboration does
+    # not fit this runner (killed twice, run 35527957238 and 35528389512, even at -j 2).  It stays
+    # in the matrix so the failure is visible and dated; it is continue-on-error so the daily
+    # baseline reports on the widths that DO build.  Remove this the day W=4 has a runner that fits.
+    continue-on-error: ${{ matrix.w == 4 }}
     steps:
       - uses: actions/cache@v4
         with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
@@ -245,6 +254,10 @@ jobs:
           # empty log was `dtc` missing, not an ISA trap.  Reverted: CI and the laptop must build
           # the same programs or `k_ipc_corr` stops being a correlation.)
           bash tb/progs/build.sh 2>&1 | tail -40
+          # *** AND THE KERNELS. ***  `quick.sh` checks t1_ecall, t4/t5_precise, t17_stval_smode,
+          # t18/t19_amo and k_unalign_ld/st; build.sh does not build them, so every run reported
+          # "8 FAILURES" that were all MISSING, never a core fault (run 35528389512).
+          bash tb/progs/build_kern.sh 2>&1 | tail -20 || echo "build_kern reported a failure (see above)"
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
             echo "===== progs build FAILED.  Running spike by hand, STDERR AND ALL: ====="
             E=$(ls tb/progs/build/*.elf 2>/dev/null | head -1)
