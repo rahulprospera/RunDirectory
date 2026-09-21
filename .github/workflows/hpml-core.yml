@@ -14,10 +14,11 @@ name: hpml-core
 # ⚠ EVERY JOB IS SIZED UNDER THE RUNTIME CAP.  Nothing here is one long step: a job that dies at the
 # wall is worth nothing, and `fail-fast: false` keeps one red shard from cancelling the rest.
 on:
-  # THE BASELINE RUNS ON ITS OWN.  Owner: "we need the baseline up and running" -- a gate nobody
-  # starts is a gate nobody has.  Daily, off the hour to dodge the scheduler stampede.
-  schedule:
-    - cron: '41 5 * * *'
+  # ⚠ NO SCHEDULE UNTIL THE LADDER IS CLEAN.  Owner, 2026-09-20: "run baseline only when the ladder
+  # is bug free .. and if u have bugs need to fix the bugs".  A nightly matrix while two known
+  # defects are open just re-finds them at full cost every night.  Add the cron back the day the
+  # ladder is green: today W=2 seed 3 hits the midcore two-producer bug and W=1 loses instructions
+  # in 3 of 65 programs.
   workflow_dispatch:
     inputs:
       branch: { description: 'hp_ml_core branch', default: 'rtl-leaves' }
