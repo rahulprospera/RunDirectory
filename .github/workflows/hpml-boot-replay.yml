@@ -163,6 +163,6 @@ jobs:
       - name: Score
         run: |
           cat v/*/summary.txt 2>/dev/null | sort -t_ -k2 -n > all.txt
-          n=$(wc -l < all.txt); p=$(grep '| MATCH' all.txt | grep -vc WEDGE); w=$(grep -c 'WEDGE' all.txt)
+          n=$(wc -l < all.txt); p=$(grep '| MATCH' all.txt | grep -vc WEDGE || true); w=$(grep -c 'WEDGE' all.txt || true)
           { echo "## Boot replay: PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "PASS $p / $n"; cat all.txt
