@@ -1,0 +1,168 @@
+name: hpml-boot-replay
+# PUBLIC runner-shell.  NO RTL OR DATA COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime and
+# uploads only the per-window verdict text.
+#
+# Linux-boot replay on the RTL (WO-070 sliced boot).  Each window restores a Spike checkpoint into
+# tb_m5_program `HPML_TB_BOOT through an ISA-only stub, runs the RTL for N cycles, then diffs EVERY
+# retire against a DUT-driven Spike co-sim (Spike fed the RTL's time values and interrupt points).
+# Tools: test/boot_replay/ on the code branch.  Data: windows/<ckpt>/{state.txt,mem.bin.gz} on the
+# data branch.  The boot agent's machine stays idle: everything heavy is here.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:  { description: 'hp_ml_core code branch (HPML_TB_BOOT enabled)', default: 'boot/sliced-rtl-1006' }
+      data:    { description: 'hp_ml_core data branch', default: 'boot-replay/win500k-6.1' }
+      cycles:  { description: 'RTL cycles per window', default: '1000000' }
+      windows: { description: 'JSON list of window dirs, or all', default: 'all' }
+permissions: { contents: read }
+# Its own group: never queues behind, or cancels, another agent's hpml-core run.
+concurrency: { group: hpml-boot-replay, cancel-in-progress: false }
+
+env:
+  REPO: rahulprospera/hp_ml_core
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs: { windows: '${{ steps.p.outputs.windows }}' }
+    steps:
+      - name: Clone data
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.data }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" data 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - id: p
+        run: |
+          if [ "${{ inputs.windows }}" = "all" ]; then
+            w=$(ls data/windows | python3 -c 'import sys,json; print(json.dumps(sorted(sys.stdin.read().split(), key=lambda s:int(s.split("_")[1]))))')
+          else
+            w='${{ inputs.windows }}'
+          fi
+          echo "windows=$w" >> "$GITHUB_OUTPUT"; echo "$w"
+
+  # ---------------------------------------------------------------- the W=2 boot-replay sim, once
+  sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Cache Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Clone code
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: runtime deps of the cached tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache g++ python3
+      - name: Build boot sim W=2
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src/rtl
+          grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
+          python3 - config/rtl_core.json 2 <<'PY'
+          import json,sys
+          p,w=sys.argv[1],int(sys.argv[2]); c=json.load(open(p)); c["issue_width"]=w
+          json.dump(c,open(p,"w"),indent=2)
+          PY
+          python3 flow/gen_rtl_config.py >/dev/null
+          mkdir -p build/w
+          verilator --binary --timing -Wall -Wno-fatal \
+            -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
+            -j "$(nproc)" --top-module tb_m5_program \
+            -y prim -y atoms -y leaves -y cluster -y tb \
+            --Mdir build/w -o tb tb/tb_m5_program.sv
+      - uses: actions/upload-artifact@v4
+        with: { name: boot-sim-w2, path: src/rtl/build/w/tb, retention-days: 3 }
+
+  # ---------------------------------------------------------------- the co-sim Spike, cached on its patch
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Clone code
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: Cache co-sim Spike
+        id: sc
+        uses: actions/cache@v4
+        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-u2404" }
+      - name: Build co-sim Spike (miss only)
+        if: steps.sc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git g++ make autoconf device-tree-compiler libboost-regex-dev libboost-system-dev
+          git clone https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk && cd /tmp/spk
+          git checkout 16c0b60
+          git apply "$GITHUB_WORKSPACE/src/test/boot_replay/spike_hpml_full.patch"
+          mkdir build && cd build && ../configure --prefix=/opt/spike-hpml && make -j"$(nproc)" && sudo make install
+          test -x /opt/spike-hpml/bin/spike || { echo "SPIKE DID NOT INSTALL"; exit 1; }
+
+  # ---------------------------------------------------------------- one job per window
+  window:
+    needs: [plan, sim, spike]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 5          # leave runners for the other agents' CI
+      matrix: { w: '${{ fromJson(needs.plan.outputs.windows) }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - name: Restore co-sim Spike
+        uses: actions/cache/restore@v4
+        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-u2404", fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: boot-sim-w2, path: sim }
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf device-tree-compiler python3
+      - name: Replay ${{ matrix.w }}
+        run: |
+          chmod +x sim/tb
+          bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
+            "${{ inputs.cycles }}" "$PWD/out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-${{ matrix.w }}
+          path: |
+            out/summary.txt
+            out/verdict.txt
+          retention-days: 14
+
+  summary:
+    needs: window
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: verdict-*, path: v }
+      - name: Score
+        run: |
+          cat v/*/summary.txt 2>/dev/null | sort -t_ -k2 -n > all.txt
+          n=$(wc -l < all.txt); p=$(grep '| MATCH' all.txt | grep -vc WEDGE); w=$(grep -c 'WEDGE' all.txt)
+          { echo "## Boot replay: PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "PASS $p / $n"; cat all.txt
