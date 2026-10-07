@@ -1,0 +1,534 @@
+name: hpml-boot-continuous
+# PUBLIC runner-shell.  NO RTL OR DATA COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime.
+#
+# ONE continuous Linux boot of the RTL, from reset to userspace, as a chain of CI jobs.  The boot bench is built
+# --savable (tb_m5_program `HPML_TB_SAVABLE, tb_boot_savable_main.cpp): each segment job runs until its wall budget,
+# saves the WHOLE model, and the next job restores it and continues on the next edge -- one simulation, never a
+# restart.  The proof job then diffs the WHOLE retire stream against a DUT-driven Spike co-sim from reset and
+# writes PROOF.md.  Tools: test/boot_replay/ on the code branch.  Image: reset/ on the data branch.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:   { description: 'hp_ml_core code branch (HPML_TB_BOOT enabled)', default: 'boot/continuous' }
+      data:     { description: 'hp_ml_core data branch (reset/ image)', default: 'boot-replay/win500k-6.1' }
+      wall_sec: { description: 'wall seconds per segment before saving', default: '18000' }
+      seg_cycles: { description: 'cycles per segment before saving (0 = wall only)', default: '0' }
+      maxcyc:   { description: 'hard cycle bound for the whole boot', default: '600000000' }
+      control:  { description: 'also run an UNBROKEN control to maxcyc (continuity check, short runs only)', default: 'false' }
+permissions: { contents: read }
+concurrency: { group: hpml-boot-continuous, cancel-in-progress: false }
+env:
+  REPO: rahulprospera/hp_ml_core
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs: { sha: '${{ steps.b.outputs.sha }}' }
+    steps:
+      - uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache g++ python3
+      - id: b
+        name: Build the SAVABLE boot sim, W=2
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src/rtl
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
+          python3 - config/rtl_core.json 2 <<'PY'
+          import json,sys
+          p,w=sys.argv[1],int(sys.argv[2]); c=json.load(open(p)); c["issue_width"]=w
+          json.dump(c,open(p,"w"),indent=2)
+          PY
+          python3 flow/gen_rtl_config.py >/dev/null
+          mkdir -p build/s
+          verilator --cc --exe --build --savable -Wall -Wno-fatal \
+            -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING +define+HPML_TB_SAVABLE \
+            -j "$(nproc)" --top-module tb_m5_program -y prim -y atoms -y leaves -y cluster -y tb \
+            --Mdir build/s -o tb tb/tb_m5_program.sv tb/tb_boot_savable_main.cpp
+          md5sum build/s/tb | tee build/s/tb.md5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cont-sim
+          retention-days: 7
+          path: |
+            src/rtl/build/s/tb
+            src/rtl/build/s/tb.md5
+            src/rtl/hpml_cfg.vh
+
+  seg0:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - id: r
+        name: Segment 0
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 0 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-0
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-0, path: out/save.sav.gz, retention-days: 7 }
+  seg1:
+    needs: [build, seg0]
+    if: needs.seg0.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-0, path: prev }
+      - id: r
+        name: Segment 1
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 1 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-1
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-1, path: out/save.sav.gz, retention-days: 7 }
+  seg2:
+    needs: [build, seg1]
+    if: needs.seg1.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-1, path: prev }
+      - id: r
+        name: Segment 2
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 2 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-2
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-2, path: out/save.sav.gz, retention-days: 7 }
+  seg3:
+    needs: [build, seg2]
+    if: needs.seg2.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-2, path: prev }
+      - id: r
+        name: Segment 3
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 3 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-3
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-3, path: out/save.sav.gz, retention-days: 7 }
+  seg4:
+    needs: [build, seg3]
+    if: needs.seg3.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-3, path: prev }
+      - id: r
+        name: Segment 4
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 4 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-4
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-4, path: out/save.sav.gz, retention-days: 7 }
+  seg5:
+    needs: [build, seg4]
+    if: needs.seg4.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-4, path: prev }
+      - id: r
+        name: Segment 5
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 5 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-5
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-5, path: out/save.sav.gz, retention-days: 7 }
+  seg6:
+    needs: [build, seg5]
+    if: needs.seg5.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-5, path: prev }
+      - id: r
+        name: Segment 6
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 6 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-6
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-6, path: out/save.sav.gz, retention-days: 7 }
+  seg7:
+    needs: [build, seg6]
+    if: needs.seg6.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-6, path: prev }
+      - id: r
+        name: Segment 7
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 7 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-7
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-7, path: out/save.sav.gz, retention-days: 7 }
+  seg8:
+    needs: [build, seg7]
+    if: needs.seg7.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-7, path: prev }
+      - id: r
+        name: Segment 8
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 8 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-8
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-8, path: out/save.sav.gz, retention-days: 7 }
+  seg9:
+    needs: [build, seg8]
+    if: needs.seg8.outputs.status == 'SAVED'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs: { status: '${{ steps.r.outputs.status }}' }
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - uses: actions/download-artifact@v4
+        with: { name: save-8, path: prev }
+      - id: r
+        name: Segment 9
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 9 "$PWD/sim/build/s/tb" data "$PWD/out" \
+            "${{ inputs.wall_sec }}" "${{ inputs.seg_cycles }}" "${{ inputs.maxcyc }}" "$PWD/prev/save.sav.gz"
+          echo "status=$(cut -d' ' -f1 out/status)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seg-9
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+            out/status
+      - uses: actions/upload-artifact@v4
+        if: steps.r.outputs.status == 'SAVED'
+        with: { name: save-9, path: out/save.sav.gz, retention-days: 7 }
+  control:
+    needs: build
+    if: inputs.control == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - name: Unbroken run to maxcyc (no save)
+        run: |
+          chmod +x sim/build/s/tb
+          bash src/test/boot_replay/ci_segment.sh 0 "$PWD/sim/build/s/tb" data "$PWD/out" 0 0 "${{ inputs.maxcyc }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: control
+          retention-days: 14
+          path: |
+            out/seg.log
+            out/retire.gz
+
+  proof:
+    needs: [build, seg0, seg1, seg2, seg3, seg4, seg5, seg6, seg7, seg8, seg9]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Clone code + data
+        run: |
+          set +e
+          for x in "src ${{ inputs.branch }}" "data ${{ inputs.data }}"; do set -- $x
+            git clone --depth 1 --branch "$2" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" "$1" 2>e.txt
+            [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          done
+      - name: Restore co-sim Spike
+        uses: actions/cache/restore@v4
+        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-u2404", fail-on-cache-miss: true }
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq device-tree-compiler python3
+      - uses: actions/download-artifact@v4
+        with: { pattern: seg-*, path: segs }
+      - uses: actions/download-artifact@v4
+        with: { name: cont-sim, path: sim }
+      - name: Stitch the segments and prove them against Spike
+        run: |
+          set -u
+          n=$(ls -d segs/seg-* | wc -l)
+          : > all.log; rm -f all.retire.gz
+          for k in $(seq 0 $((n-1))); do cat segs/seg-$k/seg.log >> all.log; cat segs/seg-$k/retire.gz >> all.retire.gz; done
+          mkdir -p img && cp data/reset/state.txt data/reset/fw_payload.elf img/ && zcat data/reset/mem.bin.gz > img/mem.bin
+          bash src/test/boot_replay/cosim_continuous.sh img data/reset/spike.dtb all.retire.gz all.log proof \
+            /opt/spike-hpml/bin/spike img/fw_payload.elf > verdict.txt 2>&1 || true
+          {
+            echo "# PROOF: continuous Linux boot of the RTL, reset -> userspace"
+            echo
+            echo "| item | value |"; echo "|---|---|"
+            echo "| code branch / commit | ${{ inputs.branch }} / ${{ needs.build.outputs.sha }} |"
+            echo "| sim binary md5 | $(cut -c1-32 sim/build/s/tb.md5) |"
+            echo "| fw_payload.elf md5 | $(md5sum img/fw_payload.elf | cut -c1-32) |"
+            echo "| Spike DTB md5 | $(md5sum data/reset/spike.dtb | cut -c1-32) |"
+            echo "| Spike co-sim patch | $(sha1sum src/test/boot_replay/spike_hpml_full.patch | cut -c1-12) |"
+            echo "| CI run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |"
+            echo "| segments | $n ($(cat segs/seg-*/status | tr '\n' ' ')) |"
+            echo; echo "## Seams (each save must equal the next restore)"; echo '```'
+            grep -h -E '^\[SEAM\]|^\[SAVABLE\]' all.log; echo '```'
+            echo; echo "## Boot milestones from the RTL's own console"; echo '```'
+            grep -h -aE 'OpenSBI v|Linux version|Run /init|REACHED USERSPACE|reached userspace|Kernel panic|WEDGE|maxcyc' all.log | head -40; echo '```'
+            echo; echo "## Instruction-by-instruction verdict vs Spike (from the first instruction at 0x1000)"; echo '```'
+            cat verdict.txt; echo '```'
+          } > PROOF.md
+          cat PROOF.md >> "$GITHUB_STEP_SUMMARY"; cat PROOF.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proof
+          retention-days: 30
+          path: |
+            PROOF.md
+            all.log
+            verdict.txt
+            proof/events
+            proof/spike_cosim.err
+
