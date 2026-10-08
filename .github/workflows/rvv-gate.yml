@@ -1,59 +1,46 @@
 name: rvv-gate
 # PUBLIC runner-shell for the RVV 1.0 standard-toolchain gate of the PRIVATE hp_vpu_ml_accelerator. No source here;
 # see rvv-gate-step.yml for the disclosure surface (allowlisted verdict lines only, no artifacts, no RTL caches).
-# STRICTLY SERIAL — one job at a time, each verdict standalone:
-#   gate-vpu -> gate-gpu -> gate-fabric -> m256-matrix -> m256-contract -> m256-oracle -> m256-fixedlat -> lockstep
+# All 8 jobs run IN PARALLEL (each on its own runner; nothing runs on the dev machine), each verdict standalone:
+#   gate-vpu | gate-gpu | gate-fabric | m256-matrix | m256-contract | m256-oracle | m256-fixedlat | lockstep
+# One run per branch at a time (concurrency group per branch).
 #   gh workflow run rvv-gate.yml --repo rahulprospera/RunDirectory -f branch=ci/opv-trap-sweep
 on:
   workflow_dispatch:
     inputs:
       branch: { description: 'private branch to run', default: 'ci/opv-trap-sweep' }
 permissions: { contents: read }
-concurrency: { group: rvv-gate, cancel-in-progress: false }
+concurrency: { group: 'rvv-gate-${{ inputs.branch }}', cancel-in-progress: false }
 jobs:
   gate-vpu:
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: gate-vpu, branch: "${{ inputs.branch }}", cmd: "env SKUS=vpu bash verif/opv_sweep/rvv_gate.sh" }
     secrets: inherit
   gate-gpu:
-    needs: gate-vpu
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: gate-gpu, branch: "${{ inputs.branch }}", cmd: "env SKUS=gpu bash verif/opv_sweep/rvv_gate.sh" }
     secrets: inherit
   gate-fabric:
-    needs: gate-gpu
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: gate-fabric, branch: "${{ inputs.branch }}", cmd: "env SKUS=fabric bash verif/opv_sweep/rvv_gate.sh" }
     secrets: inherit
   m256-matrix:
-    needs: gate-fabric
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: m256-matrix, branch: "${{ inputs.branch }}", cmd: "bash verif/ci/m256_qual.sh corr_campaign_matrix.cpp" }
     secrets: inherit
   m256-contract:
-    needs: m256-matrix
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: m256-contract, branch: "${{ inputs.branch }}", cmd: "bash verif/ci/m256_qual.sh corr_rvv_contract.cpp" }
     secrets: inherit
   m256-oracle:
-    needs: m256-contract
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: m256-oracle, branch: "${{ inputs.branch }}", cmd: "bash verif/ci/m256_qual.sh corr_rvv_spec_oracle.cpp" }
     secrets: inherit
   m256-fixedlat:
-    needs: m256-oracle
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: m256-fixedlat, branch: "${{ inputs.branch }}", cmd: "bash verif/ci/m256_qual.sh corr_vpu3_fixed_latency.cpp" }
     secrets: inherit
   lockstep:
-    needs: m256-fixedlat
-    if: ${{ !cancelled() }}
     uses: ./.github/workflows/rvv-gate-step.yml
     with: { name: lockstep, branch: "${{ inputs.branch }}", cmd: "env BUILD=1 bash verif/llvm_lockstep/run_lockstep.sh" }
     secrets: inherit
