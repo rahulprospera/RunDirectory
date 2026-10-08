@@ -1,0 +1,96 @@
+name: rvv-gate-step
+# PUBLIC runner-shell, ONE serialized step of rvv-gate.yml. NO RTL, NO source committed here: the private repo is
+# cloned at runtime with RTL_RUN_TOKEN1 (masked; clone errors scrubbed) and nothing built from it is cached or uploaded.
+#
+# DISCLOSURE SURFACE — this log is world-readable. What reaches it, and NOTHING more:
+#   · runner capability (cores / mem / disk) and tool versions (public tools)
+#   · per step, exact-pattern verdict lines only:
+#       gate      "SKU1-VPU PASS new 0 | hangs 0 | carried-state 0/22848 | fixed 0 | open 32 instr"
+#       m256      "GREEN: corr_xxx.cpp"  /  "corr_xxx.cpp NOT GREEN"
+#       lockstep  "vpu/dot_i8 LOUD OK=31 TRAP=3"   (kernel names are ours, counts only)
+#     plus a fixed marker on infrastructure failure (BUILD FAILED, ORACLE BUILD FAILED, ...)
+# Explicitly NEVER echoed: the build log (verilator command line = every RTL path and module name), harness
+# output, signal names, reports, instruction traces. All output goes to a file on the runner and is passed through
+# an ALLOWLIST of exact patterns, then restricted to a safe character set. No artifacts are uploaded (artifacts on a
+# public repo are downloadable). No build of the private RTL is cached (caches are readable by this repo's runs).
+on:
+  workflow_call:
+    inputs:
+      name:   { required: true, type: string }
+      cmd:    { required: true, type: string }
+      branch: { required: true, type: string }
+    secrets:
+      RTL_RUN_TOKEN1: { required: true }
+permissions: { contents: read }
+jobs:
+  run:
+    name: ${{ inputs.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - name: Check the private-repo tunnel is alive
+        run: |
+          set +e
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
+          if [ $? -ne 0 ]; then echo "::error title=RTL_RUN_TOKEN1 is dead::token expired, revoked, or lacks Contents:Read"; exit 1; fi
+          echo "tunnel ok"
+      - name: Cache Verilator (public tool)
+        id: vc
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-v5.048-u2404
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone -q https://github.com/verilator/verilator /tmp/v && cd /tmp/v && git checkout -q v5.048
+          autoconf && ./configure --prefix=/opt/verilator >/dev/null && make -j"$(nproc)" >/dev/null && sudo make install >/dev/null
+      - name: Cache Spike (public tool, pinned)
+        id: sc
+        uses: actions/cache@v4
+        with:
+          path: /opt/spike
+          key: spike-fdc1ffa05152-u2404
+      - name: Build Spike (miss only)
+        if: steps.sc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq device-tree-compiler libboost-regex-dev libboost-system-dev
+          git clone -q https://github.com/riscv-software-src/riscv-isa-sim /tmp/spike && cd /tmp/spike && git checkout -q fdc1ffa05152
+          mkdir build && cd build && ../configure --prefix=/opt/spike >/dev/null && make -j"$(nproc)" >/dev/null && sudo make install >/dev/null
+      - name: Runtime packages (public tools)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-riscv64-unknown-elf clang lld device-tree-compiler libboost-regex-dev libgoogle-perftools-dev zlib1g-dev ccache python3 >/dev/null
+          echo "cores=$(nproc) mem=$(free -g | awk '/^Mem:/{print $2}')GB disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone -q --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED (branch or token)"; exit 1; }
+      - name: ${{ inputs.name }}  (ALL output captured to a file, NONE echoed)
+        run: |
+          export PATH=/opt/verilator/bin:/opt/spike/bin:$PATH
+          export BUILD_JOBS=$(nproc) MAX_LOAD=999 MIN_FREE_GB=4
+          cd src
+          set +e
+          ${{ inputs.cmd }} > /tmp/step.log 2>&1
+          echo "$?" > /tmp/step.rc
+      - name: Verdict — ALLOWLIST ONLY (nothing else reaches this public log)
+        if: always()
+        run: |
+          set +e
+          L=/tmp/step.log
+          {
+            grep -oE '^SKU[123]-(VPU|GPU|Fabric) +(PASS|FAIL) +new [0-9]+ \| hangs [0-9]+ \| carried-state ([0-9]+/[0-9]+|NOT RUN) \| fixed [0-9]+ \| open [0-9]+ instr' $L
+            grep -oE 'SKU[123]-(VPU|GPU|Fabric) IDLE INVARIANT FAILED' $L
+            grep -oE '^GREEN: corr_[a-z0-9_]+\.cpp' $L
+            grep -oE 'corr_[a-z0-9_]+\.cpp (NOT GREEN|build failed)' $L
+            grep -E  '^(vpu|gpu|fabric)/[a-z0-9_]+ +(PASS|LOUD|FAIL)' $L | sed -E 's/ +first:.*$//'
+            grep -oE '(vpu|gpu|fabric)/[a-z0-9_]+: IDLE INVARIANT not clean' $L
+            grep -oE '^(ORACLE BUILD FAILED|GENERATOR FAILED|GENERATOR NOT REPRODUCIBLE|BUILD FAILED|BUILD NOT RUN|COMPILE FAILED [a-z0-9_]+)' $L
+          } | tr -cd 'A-Za-z0-9_/=.:| \n-' | head -60
+          echo "exit=$(cat /tmp/step.rc 2>/dev/null || echo missing)"
+          grep -qx 0 /tmp/step.rc
