@@ -1,0 +1,75 @@
+name: lowpower-step
+# PUBLIC runner-shell, ONE serialized step of lowpower-presets.yml (efficiency presets EDGEMX_T vs EDGEMX_E5 of the
+# PRIVATE hp_vpu_ml_accelerator). NO RTL, NO source committed here: the private repo is cloned at runtime with
+# RTL_RUN_TOKEN1 (masked; clone errors scrubbed) and nothing built from it is cached or uploaded.
+#
+# DISCLOSURE SURFACE — this log is world-readable. What reaches it, and NOTHING more:
+#   · runner capability (cores / mem / disk) and tool versions (public tools)
+#   · per step, ONE verdict line: "PASS: <step>" or "FAIL: <step>" (the gate is verdict-only at the source
+#     on CI; every count, latency table and flop/geometry figure stays in a file on the runner)
+# Explicitly NEVER echoed: the build log (verilator command line = every RTL path and module name), harness output,
+# netlist diffs, signal or module names. All output goes to a file on the runner and is passed through an ALLOWLIST
+# of exact patterns, then restricted to a safe character set. No artifacts are uploaded; no RTL build is cached.
+on:
+  workflow_call:
+    inputs:
+      step:   { required: true, type: string }
+      branch: { required: true, type: string }
+    secrets:
+      RTL_RUN_TOKEN1: { required: true }
+permissions: { contents: read }
+jobs:
+  run:
+    name: ${{ inputs.step }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Check the private-repo tunnel is alive
+        run: |
+          set +e
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
+          if [ $? -ne 0 ]; then echo "::error title=RTL_RUN_TOKEN1 is dead::token expired, revoked, or lacks Contents:Read"; exit 1; fi
+          echo "tunnel ok"
+      - name: Cache Verilator (public tool)
+        id: vc
+        uses: actions/cache@v4
+        with:
+          path: /opt/verilator
+          key: verilator-v5.048-u2404
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone -q https://github.com/verilator/verilator /tmp/v && cd /tmp/v && git checkout -q v5.048
+          autoconf && ./configure --prefix=/opt/verilator >/dev/null && make -j"$(nproc)" >/dev/null && sudo make install >/dev/null
+      - name: Runtime packages (public tools)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgoogle-perftools-dev zlib1g-dev ccache python3 time >/dev/null
+          echo "cores=$(nproc) mem=$(free -g | awk '/^Mem:/{print $2}')GB disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          # full history (not --depth 1): the netlist-identity gate archives its reference commit from history
+          git clone -q --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED (branch or token)"; exit 1; }
+      - name: ${{ inputs.step }}  (ALL output captured to a file, NONE echoed)
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          export BUILD_JOBS=$(nproc)
+          cd src
+          set +e
+          bash verif/ci/lowpower_gate.sh "${{ inputs.step }}" > /tmp/step.log 2>&1
+          echo "$?" > /tmp/step.rc
+      - name: Verdict — ALLOWLIST ONLY (nothing else reaches this public log)
+        if: always()
+        run: |
+          set +e
+          L=/tmp/step.log
+          {
+            grep -oE '^(PASS|FAIL): [a-z0-9-]+$' $L
+          } | tr -cd 'A-Za-z0-9_/=.:|(), \n-' | head -60
+          echo "exit=$(cat /tmp/step.rc 2>/dev/null || echo missing)"
+          grep -qx 0 /tmp/step.rc
