@@ -1,0 +1,65 @@
+name: lowpower-presets
+# PUBLIC runner-shell for the efficiency-preset gate (EDGEMX_T vs EDGEMX_E5) of the PRIVATE hp_vpu_ml_accelerator.
+# No source here; see lowpower-step.yml for the disclosure surface (allowlisted verdict lines only, no artifacts,
+# no RTL caches). STRICTLY SERIAL — one job at a time, each verdict standalone:
+#   audit -> leaf-identity -> vertical -> engine16 -> engine256 -> m16-diff -> m16-topdiff -> m256-topdiff -> m256-pathmx
+#   gh workflow run lowpower-presets.yml --repo rahulprospera/RunDirectory -f branch=ci/lowpower-presets
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'private branch to run', default: 'ci/lowpower-presets' }
+permissions: { contents: read }
+concurrency: { group: lowpower-presets, cancel-in-progress: false }
+jobs:
+  audit:
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: audit, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  leaf-identity:
+    needs: audit
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: leaf-identity, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  vertical:
+    needs: leaf-identity
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: vertical, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  engine16:
+    needs: vertical
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: engine16, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  engine256:
+    needs: engine16
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: engine256, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  m16-diff:
+    needs: engine256
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: m16-diff, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  m16-topdiff:
+    needs: m16-diff
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: m16-topdiff, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  m256-topdiff:
+    needs: m16-topdiff
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: m256-topdiff, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  m256-pathmx:
+    needs: m256-topdiff
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/lowpower-step.yml
+    with: { step: m256-pathmx, branch: "${{ inputs.branch }}" }
+    secrets: inherit
