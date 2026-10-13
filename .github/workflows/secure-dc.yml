@@ -10,7 +10,7 @@ name: secure-dc
 # No artifacts uploaded; no RTL build cached.
 #
 # STRICTLY SERIAL — shared repo, one job at a time, each verdict standalone:
-#   smoke -> e2e -> aes-round -> tenancy-1e4t -> tenancy-4e4t -> product -> dc-isolation
+#   smoke -> e2e -> aes-round -> tenancy-1e4t -> tenancy-4e4t -> product -> dc-isolation -> product-s512 -> dc-isolation-mutant
 #   gh workflow run secure-dc.yml --repo rahulprospera/RunDirectory -f branch=ci/secure-dc
 #   subset: -f steps='tenancy-1e4t tenancy-4e4t'   (unselected steps are skipped, order kept)
 # On FAIL a step may also print ONE coarse 'STAGE: <step> disk|oom|verilate|link|cxx|make|run|none' tag (no names).
@@ -62,4 +62,16 @@ jobs:
     if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' dc-isolation ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: dc-isolation, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  product-s512:
+    needs: dc-isolation
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' product-s512 ')) }}
+    uses: ./.github/workflows/secure-dc-step.yml
+    with: { step: product-s512, branch: "${{ inputs.branch }}" }
+    secrets: inherit
+  dc-isolation-mutant:
+    needs: product-s512
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' dc-isolation-mutant ')) }}
+    uses: ./.github/workflows/secure-dc-step.yml
+    with: { step: dc-isolation-mutant, branch: "${{ inputs.branch }}" }
     secrets: inherit
