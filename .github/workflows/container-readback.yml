@@ -53,19 +53,34 @@ jobs:
       - name: Build the container (verdict only — the command line names every RTL path)
         run: |
           export PATH=/opt/verilator/bin:$PATH
-          mkdir -p "$HOME/obj/sys"        # build_sys.sh redirects build.log into $OBJ
+          # NO PUBLIC_FLAT. --public-flat-rw made this container 3,270 generated C++ files and a
+          # 6.3 GB build tree; at BUILD_JOBS=nproc that lost the runner outright on run
+          # 38338325995 (3h28m, then "starves it for CPU/Memory"). The harness needs ONE array,
+          # and verilator/hpml_sys_public.vlt names just that one. BUILD_JOBS=2 because convert
+          # is ~92% of the build, so -j buys little and costs peak RSS linearly.
+          #
+          # $OBJ goes on /mnt: the root volume has ~20 GB free, /mnt has ~70 GB.
+          sudo mkdir -p /mnt/obj && sudo chown "$(id -u):$(id -g)" /mnt/obj
+          mkdir -p /mnt/obj/sys          # build_sys.sh redirects build.log into $OBJ
+          df -h / /mnt | sed 's/^/  df-before /'
           cd tile
-          CORE="$GITHUB_WORKSPACE/core" PUBLIC_FLAT=1 VDEFS="-DHPML_FE_XSTAGE=0" \
-            HARNESS=tb_sys_stages.cpp OBJ="$HOME/obj/sys" BUILD_JOBS="$(nproc)" \
+          CORE="$GITHUB_WORKSPACE/core" VDEFS="-DHPML_FE_XSTAGE=0" \
+            HARNESS=tb_sys_stages.cpp OBJ=/mnt/obj/sys BUILD_JOBS=2 \
             VERDICT_DIR="$HOME/ci-detail" \
             bash verif/ci/verdict_only.sh container-build \
               bash scripts/hp_vpu_3_0/build_sys.sh
+      - name: Build footprint (so a lost runner is diagnosable next time)
+        if: always()
+        run: |
+          df -h / /mnt | sed 's/^/  df-after /'
+          echo "  generated files: $(ls /mnt/obj/sys 2>/dev/null | wc -l)"
+          echo "  build tree: $(du -sh /mnt/obj/sys 2>/dev/null | cut -f1)"
       - name: Run — the readback is the whole point
         run: |
           cd tile
           # the program image is committed (verif/ci/images/) so no riscv toolchain is needed;
           # scripts/hp_vpu_3_0/build_demo2b.sh is its source of truth.
-          timeout 3000 "$HOME/obj/sys/sys" +hex=verif/ci/images/demo2b.hex > /tmp/run.log 2>&1 || true
+          timeout 3000 /mnt/obj/sys/sys +hex=verif/ci/images/demo2b.hex > /tmp/run.log 2>&1 || true
           # ALLOWLIST: the answer, completion, and the checker census. Nothing else.
           grep -E "^\s*\[result\] answer written|program completed at cycle|the value the program read back|^\s*[0-9]+ checker" /tmp/run.log || true
           if grep -q "the value the program read back from the tile: 0xbad0bad0" /tmp/run.log; then
