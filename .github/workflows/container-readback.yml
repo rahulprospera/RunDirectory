@@ -69,6 +69,11 @@ jobs:
             VERDICT_DIR="$HOME/ci-detail" \
             bash verif/ci/verdict_only.sh container-build \
               bash scripts/hp_vpu_3_0/build_sys.sh
+      - name: Why the build failed (classification only — no paths, no identifiers)
+        if: failure()
+        run: |
+          cd tile
+          VERDICT_DIR="$HOME/ci-detail" bash verif/ci/error_class.sh container-build
       - name: Build footprint (so a lost runner is diagnosable next time)
         if: always()
         run: |
