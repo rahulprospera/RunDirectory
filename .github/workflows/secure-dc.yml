@@ -13,7 +13,7 @@ name: secure-dc
 #   smoke -> e2e -> aes-round -> tenancy-1e4t -> tenancy-4e4t -> product
 #   gh workflow run secure-dc.yml --repo rahulprospera/RunDirectory -f branch=ci/secure-dc
 #   subset: -f steps='tenancy-1e4t tenancy-4e4t'   (unselected steps are skipped, order kept)
-# On FAIL a step may also print ONE coarse 'STAGE: <step> verilate|link|cxx|make|run|none' tag (no names).
+# On FAIL a step may also print ONE coarse 'STAGE: <step> disk|oom|verilate|link|cxx|make|run|none' tag (no names).
 on:
   workflow_dispatch:
     inputs:

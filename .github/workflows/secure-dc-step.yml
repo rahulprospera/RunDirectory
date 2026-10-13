@@ -43,17 +43,25 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libgoogle-perftools-dev zlib1g-dev ccache python3 time >/dev/null
           echo "cores=$(nproc) mem=$(free -g | awk '/^Mem:/{print $2}')GB disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
+      - name: Free disk (composed-top C++ outgrows the ~14 GB root; build on /mnt)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup || true
+          sudo apt-get clean
+          sudo mkdir -p /mnt/w && sudo chown -R "$(id -u):$(id -g)" /mnt/w
+          echo "free: root=$(df -BG --output=avail / | tail -1 | tr -d ' ') mnt=$(df -BG --output=avail /mnt | tail -1 | tr -d ' ')"
       - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
         run: |
           set +e
           git clone -q --depth 1 --branch "${{ inputs.branch }}" \
-            "https://x-access-token:${TOK}@github.com/rahulprospera/hp_secure_fixed_3.0.git" src 2>clone_err.txt
+            "https://x-access-token:${TOK}@github.com/rahulprospera/hp_secure_fixed_3.0.git" /mnt/w/src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED (branch or token)"; exit 1; }
       - name: ${{ inputs.step }}  (ALL output captured to a file, NONE echoed)
         run: |
           export PATH=/opt/verilator/bin:$PATH
           export BUILD_JOBS=$(nproc)
-          cd src
+          cd /mnt/w/src
+          export SECURE_DC_LOGDIR=/mnt/w/logs
           set +e
           bash verif/ci/secure_dc_gate.sh "${{ inputs.step }}" > /tmp/step.log 2>&1
           echo "$?" > /tmp/step.rc
@@ -61,6 +69,6 @@ jobs:
         if: always()
         run: |
           set +e
-          grep -oE '^(PASS|FAIL): [a-z0-9-]+$|^STAGE: [a-z0-9-]+ (verilate|link|cxx|make|run|none)$' /tmp/step.log | tr -cd 'A-Za-z0-9_/=.:|(), \n-' | head -20
+          grep -oE '^(PASS|FAIL): [a-z0-9-]+$|^STAGE: [a-z0-9-]+ (disk|oom|verilate|link|cxx|make|run|none)$' /tmp/step.log | tr -cd 'A-Za-z0-9_/=.:|(), \n-' | head -20
           echo "exit=$(cat /tmp/step.rc 2>/dev/null || echo missing)"
           grep -qx 0 /tmp/step.rc
