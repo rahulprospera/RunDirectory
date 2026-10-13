@@ -17,7 +17,7 @@ on:
         default: 'l1-leaves'
       suites:
         description: 'JSON list of suites'
-        default: '["leaf","dir_aef","dir_c","dir_d","vm","vm_wr","vm_w8","ladder","m4"]'
+        default: '["leaf","neg_arb","dir_aef","dir_c","dir_d","vm","vm_wr","vm_w8","ladder","m4"]'
       seeds:
         description: 'seeds for l1_dir C/D and l1_vs_model'
         default: '1 2 3 4 5 6 7 8'
@@ -94,6 +94,11 @@ jobs:
             vm_w8)   export VFLAGS="-GW=8 -CFLAGS -DL1W=8"; vm w8 "" ;;
             ladder)  lstb tb_ls_ladder ;;
             m4)      lstb tb_m4_mem ;;
+            neg_arb) # the tag_arb bench's negative controls: each MUST fail (a checker never seen to fail is no evidence)
+                     verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -j $(nproc) --top-module tb_hpml_l1_tag_arb \
+                       -y prim -y atoms -y leaves -y tb --Mdir /tmp/obj_na -o na tb/tb_hpml_l1_tag_arb.sv > $L/na.build.log 2>&1 || exit 2
+                     for n in 1 2 3 4 5; do one neg_arb_$n "self-test FAIL" /tmp/obj_na/na +neg=$n; done
+                     one neg_arb_0 "self-test PASS" /tmp/obj_na/na +neg=0 ;;
             *)       echo "unknown suite $SUITE"; exit 2 ;;
           esac
           echo "----- $SUITE: RUNS $runs / PASS $pass -----"
