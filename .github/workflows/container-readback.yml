@@ -59,7 +59,10 @@ jobs:
           # and verilator/hpml_sys_public.vlt names just that one. BUILD_JOBS=2 because convert
           # is ~92% of the build, so -j buys little and costs peak RSS linearly.
           #
-          # $OBJ goes on /mnt: the root volume has ~20 GB free, /mnt has ~70 GB.
+          # $OBJ is on /mnt by habit, NOT for space: measured on run 38356403485, ubuntu-latest
+          # has 145 GB with 86 GB free and /mnt resolves to the same /dev/root. Disk was never
+          # the constraint -- the lean build is 1.4 GB. The df lines stay so a build that dies
+          # silently still leaves the one number that rules disk in or out.
           sudo mkdir -p /mnt/obj && sudo chown "$(id -u):$(id -g)" /mnt/obj
           mkdir -p /mnt/obj/sys          # build_sys.sh redirects build.log into $OBJ
           df -h / /mnt | sed 's/^/  df-before /'
@@ -73,7 +76,9 @@ jobs:
         if: failure()
         run: |
           cd tile
-          VERDICT_DIR="$HOME/ci-detail" bash verif/ci/error_class.sh container-build
+          # the detail log holds six echo lines; build_sys.sh redirects verilator into $OBJ.
+          VERDICT_DIR="$HOME/ci-detail" bash verif/ci/error_class.sh container-build \
+            /mnt/obj/sys/build.log
       - name: Build footprint (so a lost runner is diagnosable next time)
         if: always()
         run: |
