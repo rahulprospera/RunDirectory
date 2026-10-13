@@ -69,6 +69,6 @@ jobs:
         if: always()
         run: |
           set +e
-          grep -oE '^(PASS|FAIL): [a-z0-9-]+$|^STAGE: [a-z0-9-]+ (disk|oom|verilate|link|cxx|make|run|none)$' /tmp/step.log | tr -cd 'A-Za-z0-9_/=.:|(), \n-' | head -20
+          grep -oE '^(PASS|FAIL): [a-z0-9-]+$|^STAGE: [a-z0-9-]+ (disk|oom|verilate|link|cxx|make|run|none)$|^CHECK: [a-z0-9-]+ (setup|V[0-9]+) (PASS|FAIL)$' /tmp/step.log | tr -cd 'A-Za-z0-9_/=.:|(), \n-' | head -20
           echo "exit=$(cat /tmp/step.rc 2>/dev/null || echo missing)"
           grep -qx 0 /tmp/step.rc
