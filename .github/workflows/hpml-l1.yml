@@ -1,0 +1,100 @@
+name: hpml-l1
+# PUBLIC runner-shell.  NO RTL COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime via a
+# read-only token and runs the L1-rebuild benches (branch l1-leaves): the L1 leaf benches, the
+# directed races (tb/l1_dir), the RTL-vs-model harness (tb/l1_vs_model), and the LS benches with the
+# RTL L1 (-DHPML_TB_L1RTL).  SHARDED by suite: every job is one short build + its runs.
+#
+# Every run must print its POSITIVE verdict token (OVERALL PASS / self-test PASS) AND exit 0; a run
+# that printed nothing is a FAIL, never a pass.  The job prints "RUNS n / PASS n" so a shard that ran
+# nothing is visible.
+# VERDICT-ONLY: this repo is PUBLIC, so its logs are world-readable -- the job prints PASS/FAIL per run
+# and nothing else (no log tails, no artifacts).  Reproduce a FAIL locally from its name (suite/seed).
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'hp_ml_core branch'
+        default: 'l1-leaves'
+      suites:
+        description: 'JSON list of suites'
+        default: '["leaf","dir_aef","dir_c","dir_d","vm","vm_wr","vm_w8","ladder","m4"]'
+      seeds:
+        description: 'seeds for l1_dir C/D and l1_vs_model'
+        default: '1 2 3 4 5 6 7 8'
+      vm_env:
+        description: 'extra env for the vm suites, e.g. WINDOW=128'
+        default: ''
+permissions: { contents: read }
+concurrency:
+  group: hpml-l1-${{ inputs.branch }}
+  cancel-in-progress: false
+jobs:
+  l1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(inputs.suites) }}
+    steps:
+      - name: Cache Verilator (tool)
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3 libsystemc-dev
+          # run.sh wants $SYSTEMC_HOME/{include,lib}
+          sudo mkdir -p /opt/sc && sudo ln -sf /usr/include /opt/sc/include && sudo ln -sf /usr/lib/x86_64-linux-gnu /opt/sc/lib
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+          cd src && echo "HEAD $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s)"
+      - name: Suite ${{ matrix.suite }}
+        env:
+          SUITE: ${{ matrix.suite }}
+          SEEDS: ${{ inputs.seeds }}
+          VMENV: ${{ inputs.vm_env }}
+        run: |
+          export PATH=/opt/verilator/bin:$PATH SYSTEMC_HOME=/opt/sc
+          cd src/rtl
+          L=/tmp/l1logs; mkdir -p $L; runs=0; pass=0
+          one() {   # one <name> <token> <cmd...> : rc 0 AND the positive token, else FAIL
+            local n=$1 tok=$2; shift 2; runs=$((runs+1))
+            "$@" > $L/$n.log 2>&1; local rc=$?
+            if [ $rc -eq 0 ] && grep -aq "$tok" $L/$n.log; then pass=$((pass+1)); echo "  PASS $n"
+            else echo "  FAIL $n (rc=$rc)"; fi
+          }
+          dir()  { for s in $2; do one dir_$1_s$s "OVERALL PASS" bash tb/l1_dir/run.sh $1 $s; done; }
+          vm()   { for s in $SEEDS; do one vm_${1}_s$s "OVERALL PASS" env $VMENV $2 bash tb/l1_vs_model/run.sh $s; done; }
+          lstb() { one $1 "self-test PASS" bash -c "verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -j $(nproc) \
+                     +define+HPML_TB_L1RTL --top-module $1 -y prim -y atoms -y leaves -y cluster -y tb \
+                     --Mdir /tmp/obj_$1 -o $1 tb/$1.sv > $L/$1.build.log 2>&1 || exit 2; /tmp/obj_$1/$1"; }
+          export OBJ=/tmp/obj_l1 TMPDIR=/tmp
+          case "$SUITE" in
+            leaf)    for m in hpml_l1_lane hpml_l1_plru hpml_l1_tag_arb hpml_l1_tag_array; do
+                       one leaf_$m "1 pass / 0 fail" env NJ=$(nproc) bash flow/sim.sh $m; done ;;
+            dir_aef) dir A "1 2 3"; dir E "1 2 3"; dir F "1 2 3" ;;
+            dir_c)   dir C "$SEEDS" ;;
+            dir_d)   dir D "$SEEDS" ;;
+            vm)      vm w4 "" ;;
+            vm_wr)   vm wr5 "WR_RDY_PCT=5" ;;
+            vm_w8)   export VFLAGS="-GW=8 -CFLAGS -DL1W=8"; vm w8 "" ;;
+            ladder)  lstb tb_ls_ladder ;;
+            m4)      lstb tb_m4_mem ;;
+            *)       echo "unknown suite $SUITE"; exit 2 ;;
+          esac
+          echo "----- $SUITE: RUNS $runs / PASS $pass -----"
+          [ $runs -gt 0 ] && [ $pass -eq $runs ]
