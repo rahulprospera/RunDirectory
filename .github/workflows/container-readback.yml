@@ -4,8 +4,8 @@ name: container-readback
 # THE QUESTION: does CPU -> GPU + fabric close the loop on the BOOTING core? The container
 # already runs end to end (program completes, bridge DMAs 255 weight columns + 264 activations,
 # launch completes in 289 cycles, fabric returns real scores). What was never proven is the
-# READBACK: this core's LS unit has no MMIO load path (hpml_core.sv:153-156), so the answer now
-# goes to ordinary memory and the program reads it there.
+# READBACK: the answer is delivered through ordinary memory rather than a register window, for
+# reasons recorded privately. This job exists to prove that path end to end.
 #
 # ALLOWLISTED VERDICT ONLY. The verilator command line carries every RTL path and module name,
 # and these logs are world-readable, so the build runs through verif/ci/verdict_only.sh and the
