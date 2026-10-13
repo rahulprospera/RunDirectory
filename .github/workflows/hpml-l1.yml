@@ -68,6 +68,7 @@ jobs:
           SEEDS: ${{ inputs.seeds }}
           VMENV: ${{ inputs.vm_env }}
         run: |
+          set +e    # Actions runs `bash -e`: a failing run must be COUNTED as a FAIL, not abort the job silently
           export PATH=/opt/verilator/bin:$PATH SYSTEMC_HOME=/opt/sc
           cd src/rtl
           L=/tmp/l1logs; mkdir -p $L; runs=0; pass=0
