@@ -1,0 +1,77 @@
+name: container-readback
+# PUBLIC runner-shell. NO source here: clones the PRIVATE tile and the PRIVATE core at job time.
+#
+# THE QUESTION: does CPU -> GPU + fabric close the loop on the BOOTING core? The container
+# already runs end to end (program completes, bridge DMAs 255 weight columns + 264 activations,
+# launch completes in 289 cycles, fabric returns real scores). What was never proven is the
+# READBACK: this core's LS unit has no MMIO load path (hpml_core.sv:153-156), so the answer now
+# goes to ordinary memory and the program reads it there.
+#
+# ALLOWLISTED VERDICT ONLY. The verilator command line carries every RTL path and module name,
+# and these logs are world-readable, so the build runs through verif/ci/verdict_only.sh and the
+# run is filtered to the result line.
+on:
+  workflow_dispatch:
+    inputs:
+      tile_branch: { description: 'hp_vpu_ml_accelerator branch', default: 'hp-vpu-pipe-verif' }
+      core_ref:    { description: 'hp_ml_core ref (tag or branch)', default: 'rtl-linux-boot-20of20-2026-10-06' }
+      sku:         { description: 'SKU', default: 'DLEN256_GPU_FAB' }
+permissions: { contents: read }
+concurrency: { group: container-readback, cancel-in-progress: false }
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Cache Verilator (tool)
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache \
+            libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache python3
+      - name: Checkout PRIVATE tile (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.tile_branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" tile 2>te.txt
+          [ $? -eq 0 ] && echo "tile checkout ok" || { echo "tile checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' te.txt; exit 1; }
+      - name: Checkout PRIVATE core at the boot tag (token masked)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.core_ref }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" core 2>ce.txt
+          [ $? -eq 0 ] && echo "core checkout ok" || { echo "core checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' ce.txt; exit 1; }
+      - name: Build the container (verdict only — the command line names every RTL path)
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          mkdir -p "$HOME/obj/sys"        # build_sys.sh redirects build.log into $OBJ
+          cd tile
+          CORE="$GITHUB_WORKSPACE/core" PUBLIC_FLAT=1 VDEFS="-DHPML_FE_XSTAGE=0" \
+            HARNESS=tb_sys_stages.cpp OBJ="$HOME/obj/sys" BUILD_JOBS="$(nproc)" \
+            VERDICT_DIR="$HOME/ci-detail" \
+            bash verif/ci/verdict_only.sh container-build \
+              bash scripts/hp_vpu_3_0/build_sys.sh
+      - name: Run — the readback is the whole point
+        run: |
+          cd tile
+          # the program image is committed (verif/ci/images/) so no riscv toolchain is needed;
+          # scripts/hp_vpu_3_0/build_demo2b.sh is its source of truth.
+          timeout 3000 "$HOME/obj/sys/sys" +hex=verif/ci/images/demo2b.hex > /tmp/run.log 2>&1 || true
+          # ALLOWLIST: the answer, completion, and the checker census. Nothing else.
+          grep -E "^\s*\[result\] answer written|program completed at cycle|the value the program read back|^\s*[0-9]+ checker" /tmp/run.log || true
+          if grep -q "the value the program read back from the tile: 0xbad0bad0" /tmp/run.log; then
+            echo "FAIL: container-readback (program published the timeout marker)"; exit 1
+          elif grep -q "\[result\] answer written" /tmp/run.log; then
+            echo "PASS: container-readback"
+          else
+            echo "FAIL: container-readback (no result line — run did not reach the readback)"; exit 1
+          fi
