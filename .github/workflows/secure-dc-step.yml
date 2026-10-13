@@ -7,19 +7,23 @@ on:
       step:   { required: true, type: string }
       branch: { required: true, type: string }
     secrets:
-      RTL_RUN_TOKEN_SECURE: { required: true }
+      RTL_RUN_TOKEN_SECURE: { required: false }
+      RTL_RUN_TOKEN1:       { required: false }
 permissions: { contents: read }
 jobs:
   run:
     name: ${{ inputs.step }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      # dedicated token if minted, else the shared one with hp_secure_fixed_3.0 added to its repo list
+      TOK: ${{ secrets.RTL_RUN_TOKEN_SECURE || secrets.RTL_RUN_TOKEN1 }}
     steps:
       - name: Check the private-repo tunnel is alive
         run: |
           set +e
-          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_SECURE }}@github.com/rahulprospera/hp_secure_fixed_3.0.git" HEAD >/dev/null 2>tok_err.txt
-          if [ $? -ne 0 ]; then echo "::error title=RTL_RUN_TOKEN_SECURE is dead::Mint a fine-grained PAT (hp_secure_fixed_3.0 only, Contents Read-only) and: gh secret set RTL_RUN_TOKEN_SECURE --repo rahulprospera/RunDirectory"; exit 1; fi
+          git ls-remote "https://x-access-token:${TOK}@github.com/rahulprospera/hp_secure_fixed_3.0.git" HEAD >/dev/null 2>tok_err.txt
+          if [ $? -ne 0 ]; then echo "::error title=no token can read hp_secure_fixed_3.0::Add hp_secure_fixed_3.0 (Contents Read-only) to RTL_RUN_TOKEN1, or set RTL_RUN_TOKEN_SECURE"; exit 1; fi
           echo "tunnel ok"
       - name: Cache Verilator (public tool)
         id: vc
@@ -43,7 +47,7 @@ jobs:
         run: |
           set +e
           git clone -q --depth 1 --branch "${{ inputs.branch }}" \
-            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_SECURE }}@github.com/rahulprospera/hp_secure_fixed_3.0.git" src 2>clone_err.txt
+            "https://x-access-token:${TOK}@github.com/rahulprospera/hp_secure_fixed_3.0.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED (branch or token)"; exit 1; }
       - name: ${{ inputs.step }}  (ALL output captured to a file, NONE echoed)
         run: |

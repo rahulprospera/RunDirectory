@@ -1,7 +1,7 @@
 name: secure-dc
 # PUBLIC runner-shell for the HP-Secure 2.0 datacenter baseline gate of the PRIVATE hp_secure_fixed_3.0.
-# NO RTL, NO source committed here: the private repo is cloned at runtime with RTL_RUN_TOKEN_SECURE
-# (fine-grained PAT, hp_secure_fixed_3.0 only, Contents Read-only; masked; clone errors scrubbed).
+# NO RTL, NO source committed here: the private repo is cloned at runtime with RTL_RUN_TOKEN_SECURE if set,
+# else RTL_RUN_TOKEN1 (fine-grained PAT, Contents Read-only; masked; clone errors scrubbed).
 #
 # DISCLOSURE SURFACE — this log is world-readable. What reaches it, and NOTHING more:
 #   · runner capability (cores / mem / disk) and tool versions (public tools)
