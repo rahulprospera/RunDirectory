@@ -93,10 +93,25 @@ jobs:
           timeout 3000 /mnt/obj/sys/sys +hex=verif/ci/images/demo2b.hex > /tmp/run.log 2>&1 || true
           # ALLOWLIST: the answer, completion, and the checker census. Nothing else.
           grep -E "^\s*\[result\] answer written|program completed at cycle|the value the program read back|^\s*[0-9]+ checker" /tmp/run.log || true
+          # TWO verdicts, because they are two claims. The PATH closing is what this job was
+          # built to prove; the ANSWER being right is what makes it a demo. The first version
+          # checked only for a result line and the absence of the timeout marker, and duly
+          # reported PASS on run 38362098159 while the container returned the wrong index. A
+          # path check must not wear a correctness check's clothes.
           if grep -q "the value the program read back from the tile: 0xbad0bad0" /tmp/run.log; then
-            echo "FAIL: container-readback (program published the timeout marker)"; exit 1
-          elif grep -q "\[result\] answer written" /tmp/run.log; then
-            echo "PASS: container-readback"
+            echo "FAIL: container-readback-path (program published the timeout marker)"; exit 1
+          elif ! grep -q "\[result\] answer written" /tmp/run.log; then
+            echo "FAIL: container-readback-path (no result line — run did not reach the readback)"; exit 1
+          fi
+          echo "PASS: container-readback-path"
+          # The model's own expectation, from the generated header the image was built against.
+          exp=$(sed -n 's/^#define D2B_EXPECT \([0-9][0-9]*\).*/\1/p' sw/core_host/demo2b_model.h)
+          got=$(sed -n 's/.*\[result\] answer written.*idx=\([0-9][0-9]*\).*/\1/p' /tmp/run.log | head -1)
+          if [ -z "$exp" ] || [ -z "$got" ]; then
+            echo "FAIL: container-readback-answer (could not read expected or returned index)"; exit 1
+          elif [ "$exp" = "$got" ]; then
+            echo "PASS: container-readback-answer (index $got)"
           else
-            echo "FAIL: container-readback (no result line — run did not reach the readback)"; exit 1
+            echo "FAIL: container-readback-answer (host model expects index $exp, container returned $got)"
+            exit 1
           fi
