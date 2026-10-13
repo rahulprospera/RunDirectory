@@ -12,44 +12,48 @@ name: secure-dc
 # STRICTLY SERIAL — shared repo, one job at a time, each verdict standalone:
 #   smoke -> e2e -> aes-round -> tenancy-1e4t -> tenancy-4e4t -> product
 #   gh workflow run secure-dc.yml --repo rahulprospera/RunDirectory -f branch=ci/secure-dc
+#   subset: -f steps='tenancy-1e4t tenancy-4e4t'   (unselected steps are skipped, order kept)
+# On FAIL a step may also print ONE coarse 'STAGE: <step> verilate|link|cxx|make|run|none' tag (no names).
 on:
   workflow_dispatch:
     inputs:
       branch: { description: 'private branch to run', default: 'ci/secure-dc' }
+      steps:  { description: "'all' or a space-separated subset", default: 'all' }
 permissions: { contents: read }
 concurrency: { group: secure-dc, cancel-in-progress: false }
 jobs:
   smoke:
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' smoke ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: smoke, branch: "${{ inputs.branch }}" }
     secrets: inherit
   e2e:
     needs: smoke
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' e2e ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: e2e, branch: "${{ inputs.branch }}" }
     secrets: inherit
   aes-round:
     needs: e2e
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' aes-round ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: aes-round, branch: "${{ inputs.branch }}" }
     secrets: inherit
   tenancy-1e4t:
     needs: aes-round
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' tenancy-1e4t ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: tenancy-1e4t, branch: "${{ inputs.branch }}" }
     secrets: inherit
   tenancy-4e4t:
     needs: tenancy-1e4t
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' tenancy-4e4t ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: tenancy-4e4t, branch: "${{ inputs.branch }}" }
     secrets: inherit
   product:
     needs: tenancy-4e4t
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' product ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: product, branch: "${{ inputs.branch }}" }
     secrets: inherit
