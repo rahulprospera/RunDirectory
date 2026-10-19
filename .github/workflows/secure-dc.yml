@@ -11,8 +11,8 @@ name: secure-dc
 #
 # STRICTLY SERIAL — shared repo, one job at a time, each verdict standalone:
 #   smoke -> e2e -> aes-round -> tenancy-1e4t -> tenancy-4e4t -> product -> dc-isolation -> product-s512 -> dc-isolation-mutant
-#   -> dc-close-gcm -> dc-close-gcm-mut -> dc-close-chain -> dc-close-chain-mut -> dc-close-vault -> dc-close-core
-#   close only: -f branch=secure/dc-2.0-close -f steps='dc-close-gcm dc-close-gcm-mut dc-close-chain dc-close-chain-mut dc-close-vault dc-close-core'
+#   -> dc-close-gcm -> dc-close-gcm-mut -> dc-close-chain -> dc-close-chain-mut -> dc-close-vault -> dc-close-core-s512
+#   close only: -f branch=secure/dc-2.0-close -f steps='dc-close-gcm dc-close-gcm-mut dc-close-chain dc-close-chain-mut dc-close-vault dc-close-core-s512'
 #   gh workflow run secure-dc.yml --repo rahulprospera/RunDirectory -f branch=ci/secure-dc
 #   subset: -f steps='tenancy-1e4t tenancy-4e4t'   (unselected steps are skipped, order kept)
 # On FAIL a step may also print ONE coarse 'STAGE: <step> disk|oom|verilate|link|cxx|make|run|none' tag (no names).
@@ -107,9 +107,10 @@ jobs:
     uses: ./.github/workflows/secure-dc-step.yml
     with: { step: dc-close-vault, branch: "${{ inputs.branch }}" }
     secrets: inherit
-  dc-close-core:
+  # Runner-sized core (512 b beat): the 1024 b core is OOM-killed on a 15 GB runner, so it stays a local cell.
+  dc-close-core-s512:
     needs: dc-close-vault
-    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' dc-close-core ')) }}
+    if: ${{ !cancelled() && (inputs.steps == 'all' || contains(format(' {0} ', inputs.steps), ' dc-close-core-s512 ')) }}
     uses: ./.github/workflows/secure-dc-step.yml
-    with: { step: dc-close-core, branch: "${{ inputs.branch }}" }
+    with: { step: dc-close-core-s512, branch: "${{ inputs.branch }}" }
     secrets: inherit
