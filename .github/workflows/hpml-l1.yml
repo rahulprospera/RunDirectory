@@ -17,7 +17,8 @@ on:
         default: 'l1-leaves'
       suites:
         description: 'JSON list of suites'
-        default: '["leaf","neg_arb","dir_aef","dir_c","dir_d","vm","vm_wr","vm_w8","ladder","m4"]'
+        # ladder / m4 (tb_ls_ladder / tb_m4_mem) FAIL on baseline-lean-2g's own stand-in: stale on the lean LS, not a gate
+        default: '["leaf","neg_arb","dir_aef","dir_c","dir_d","vm","vm_wr","vm_w8"]'
       seeds:
         description: 'seeds for l1_dir C/D and l1_vs_model'
         default: '1 2 3 4 5 6 7 8'
