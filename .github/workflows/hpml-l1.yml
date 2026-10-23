@@ -86,7 +86,7 @@ jobs:
                      --Mdir /tmp/obj_$1 -o $1 tb/$1.sv > $L/$1.build.log 2>&1 || exit 2; /tmp/obj_$1/$1"; }
           export OBJ=/tmp/obj_l1 TMPDIR=/tmp
           case "$SUITE" in
-            leaf)    for m in hpml_l1_lane hpml_l1_plru hpml_l1_tag_arb hpml_l1_tag_array; do
+            leaf)    for m in hpml_l1_lane hpml_l1_plru hpml_l1_tag_arb hpml_l1_tag_array hpml_aplic hpml_cmp_lt; do
                        one leaf_$m "1 pass / 0 fail" env NJ=$(nproc) bash flow/sim.sh $m; done ;;
             dir_aef) dir A "1 2 3"; dir E "1 2 3"; dir F "1 2 3" ;;
             dir_c)   dir C "$SEEDS" ;;
