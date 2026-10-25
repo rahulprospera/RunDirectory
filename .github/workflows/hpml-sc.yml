@@ -1,0 +1,123 @@
+name: hpml-sc
+# PUBLIC runner-shell.  NO MODEL SOURCE COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime, builds
+# the SystemC model runner (systemc/rw, scripts/rw_build.sh) and runs programs on it, one job per run.
+#
+# NOTHING READABLE LEAVES THE RUNNER: each job builds its own binary (no artifact carries the model), the
+# job log prints a VERDICT line per run only (halted / CoreMark crclist matched), and the full run output
+# is ENCRYPTED to the owner's public key below (AES-256 data key, RSA-4096 wrapped) before upload.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'hp_ml_core branch'
+        default: 'sc-scale'
+      defines:
+        description: 'extra -D flags for the model build'
+        default: ''
+      runs:
+        description: 'JSON list of {"n":name,"p":cm2|cm1,"e":"ENV=.. ENV=.."}'
+        default: '[{"n":"w2","p":"cm2","e":"RW_W=2"},{"n":"w4","p":"cm2","e":"RW_W=4"}]'
+      maxcyc:
+        description: 'cycle cap per run'
+        default: '400000000'
+permissions:
+  contents: read
+concurrency:
+  group: hpml-sc-${{ inputs.branch }}-${{ inputs.defines }}
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ${{ fromJSON(inputs.runs) }}
+    steps:
+      - name: Cache SystemC (tool)
+        id: sc
+        uses: actions/cache@v4
+        with:
+          path: /opt/systemc
+          key: systemc-3.0.2-u2404-cxx17
+      - name: Build SystemC (miss only)
+        if: steps.sc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq cmake g++
+          git clone -q --depth 1 --branch 3.0.2 https://github.com/accellera-official/systemc /tmp/sc \
+            || git clone -q --depth 1 https://github.com/accellera-official/systemc /tmp/sc
+          cmake -S /tmp/sc -B /tmp/scb -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 -DCMAKE_INSTALL_PREFIX=/opt/systemc >/dev/null
+          cmake --build /tmp/scb -j"$(nproc)" >/dev/null && sudo cmake --install /tmp/scb >/dev/null
+          [ -d /opt/systemc/lib ] || sudo ln -s "$(dirname "$(find /opt/systemc -name 'libsystemc.so*' | head -1)")" /opt/systemc/lib
+          ls /opt/systemc/lib | head -3
+      - name: Deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf picolibc-riscv64-unknown-elf >/dev/null 2>&1 || sudo apt-get install -y -qq gcc-riscv64-unknown-elf
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        run: |
+          set +e
+          git clone -q --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
+          cd src && echo "HEAD $(git rev-parse --short HEAD)"
+      - name: Build model + program
+        env:
+          DEFS: ${{ inputs.defines }}
+          PROG: ${{ matrix.r.p }}
+        run: |
+          mkdir -p /tmp/out; cd src
+          SC=/opt/systemc bash scripts/rw_build.sh $DEFS > /tmp/out/build.log 2>&1 || { echo "model BUILD FAILED (log in the encrypted bundle)"; exit 1; }
+          echo "model built"
+          RV="riscv64-unknown-elf-gcc -march=rv64im -mabi=lp64 -O2 -nostdlib -ffreestanding -fno-tree-loop-distribute-patterns"
+          case "$PROG" in
+            cm2) (cd test/coremark && $RV -DITERATIONS=2 -DPERFORMANCE_RUN=1 -Ibarebones -I. -T cm.ld crt0.S core_*.c barebones/*.c -lgcc -o /tmp/prog.elf) > /tmp/out/prog.log 2>&1 ;;
+            cm1) (cd rtl/tb/progs && mkdir -p build && sed -i 's/^timeout 300 spike/: spike/; s/^python3 mkmeta.py/: mkmeta/' build_cm.sh && bash build_cm.sh 1 && cp build/cm1.elf /tmp/prog.elf) > /tmp/out/prog.log 2>&1 ;;
+            *) echo "unknown program $PROG"; exit 2 ;;
+          esac || { echo "program BUILD FAILED ($PROG) (log in the encrypted bundle)"; exit 1; }
+          echo "program $PROG built"
+      - name: Run ${{ matrix.r.n }}
+        env:
+          RUNENV: ${{ matrix.r.e }}
+          MAXC: ${{ inputs.maxcyc }}
+          N: ${{ matrix.r.n }}
+          PROG: ${{ matrix.r.p }}
+        run: |
+          mkdir -p /tmp/out; cd src
+          echo "$RUNENV" > /tmp/out/env.txt
+          timeout 2100 env $RUNENV RW_UART=1 build/rw/rw_run /tmp/prog.elf "$MAXC" > /tmp/out/$N.log 2>&1; rc=$?
+          h=no; grep -aq "HALT$" /tmp/out/$N.log && h=yes
+          ok=n/a; [ "$PROG" = cm2 ] && { grep -aq "crclist *: 0xe714" /tmp/out/$N.log && ok=yes || ok=NO; }
+          echo "VERDICT $N: rc=$rc halted=$h crclist_ok=$ok"
+          echo "$rc" > /tmp/out/rc.txt
+      - name: Encrypt results (only the owner's private key opens them)
+        if: always()
+        run: |
+          cat > /tmp/pub.pem <<'PUBKEY'
+          -----BEGIN PUBLIC KEY-----
+          MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAwRtmCpQQeLJcxlqPTcLo
+          Jie5ywvnFIXyLiy0tEVH23EBaTC1II5uk/wfrxBbosJQrybF5VKl0ttF5Wxuz3iW
+          rUEVIOJyw4pEHzlg6BBkA9lrn2hUTWg/HKDxmpq1/RRD6Yme0kF3Bs191VzYDomw
+          WVbzwph47Z1dGZVL9y6O6jfQFras8X8EoPHV9cUnAV6ooZlIJmoI38hPFhRMS8CU
+          AMVGoQ7S+AnbBQ/KnReRmlE3cquDnUtQ4J4eZyW1XIRDNqHCLPnpaK4QKmyV8Ugz
+          b2oBgdXuNpCufLQhya9/H9b/p/LPbbmQxEItau0lmpxzGOmHHXiJ5C/g2KJqHkvD
+          6E4fy28kMO22UtUuLP3PKokvGvhDmVh82+jNmq6mLdoVx+4znzcV4yojxNb3GFnH
+          2zlAOdiZIpm2wJmN9BB5fSM+DGmFoZ19HRYtyfqJqrU27c2CcQTF/JFDM/vgHKpm
+          LZVKd8QB9FBRiE9qNf4zMtBjoF7gTj6zgYsq5OjRF7fqw5/ScagKXxvt5+mYV76R
+          6BGC0gnFK+XEcq/DSitG3hqey7qiB6vQLyXaD7BXYjhwl1Yy09VtS5YAZjIm8rrz
+          WE58zzIZNgIlywJyqcQEW6jRKKFTmmR5h2oRHMjOLoRnq2K7N+6V9N2sKjG6GuvZ
+          yhHT1TyT7CPJzOuVVlffgYcCAwEAAQ==
+          -----END PUBLIC KEY-----
+          PUBKEY
+          sed -i 's/^ *//' /tmp/pub.pem
+          cd /tmp && tar czf out.tgz out 2>/dev/null || tar czf out.tgz --files-from /dev/null
+          export K=$(openssl rand -hex 32)
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:K -in out.tgz -out res.enc
+          printf %s "$K" | openssl pkeyutl -encrypt -pubin -inkey pub.pem -pkeyopt rsa_padding_mode:oaep -out key.enc
+          unset K; rm -f out.tgz; rm -rf out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hpml-sc-${{ matrix.r.n }}
+          path: |
+            /tmp/res.enc
+            /tmp/key.enc
+          retention-days: 14
