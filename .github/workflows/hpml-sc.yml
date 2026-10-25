@@ -25,9 +25,7 @@ on:
         default: '400000000'
 permissions:
   contents: read
-concurrency:
-  group: hpml-sc-${{ inputs.branch }}-${{ inputs.defines }}
-  cancel-in-progress: false
+# no concurrency group: a per-branch group silently CANCELS an older PENDING run when a newer one queues behind it
 jobs:
   run:
     runs-on: ubuntu-latest
