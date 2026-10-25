@@ -17,6 +17,9 @@ on:
       runs:
         description: 'JSON list of {"n":name,"p":cm2|cm1,"e":"ENV=.. ENV=.."}'
         default: '[{"n":"w2","p":"cm2","e":"RW_W=2"},{"n":"w4","p":"cm2","e":"RW_W=4"}]'
+      rtl_ref:
+        description: 'hp_ml_core ref whose rtl/tb/progs builds cm1 (the RTL perf program)'
+        default: 'perf-exp-b34'
       maxcyc:
         description: 'cycle cap per run'
         default: '400000000'
@@ -58,7 +61,13 @@ jobs:
           git clone -q --depth 1 --branch "${{ inputs.branch }}" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
-          cd src && echo "HEAD $(git rev-parse --short HEAD)"
+          cd src && echo "HEAD $(git rev-parse --short HEAD)" && cd ..
+          if [ "${{ matrix.r.p }}" = cm1 ]; then
+            git clone -q --depth 1 --filter=blob:none --sparse --branch "${{ inputs.rtl_ref }}" \
+              "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" rtlref 2>clone_err.txt \
+              && git -C rtlref sparse-checkout set rtl/tb/progs test/coremark \
+              && echo "rtl ref ok $(git -C rtlref rev-parse --short HEAD)" || { echo "rtl ref checkout FAILED"; exit 1; }
+          fi
       - name: Build model + program
         env:
           DEFS: ${{ inputs.defines }}
@@ -69,8 +78,8 @@ jobs:
           echo "model built"
           RV="riscv64-unknown-elf-gcc -march=rv64im -mabi=lp64 -O2 -nostdlib -ffreestanding -fno-tree-loop-distribute-patterns"
           case "$PROG" in
-            cm2) (cd test/coremark && $RV -DITERATIONS=2 -DPERFORMANCE_RUN=1 -Ibarebones -I. -T cm.ld crt0.S core_*.c barebones/*.c -lgcc -o /tmp/prog.elf) > /tmp/out/prog.log 2>&1 ;;
-            cm1) (cd rtl/tb/progs && mkdir -p build && sed -i 's/^timeout 300 spike/: spike/; s/^python3 mkmeta.py/: mkmeta/' build_cm.sh && bash build_cm.sh 1 && cp build/cm1.elf /tmp/prog.elf) > /tmp/out/prog.log 2>&1 ;;
+            cm2) (cd test/coremark && $RV -DITERATIONS=2 -DPERFORMANCE_RUN=1 -DHAS_FLOAT=0 '-DFLAGS_STR="-O2"' -Ibarebones -I. -T cm.ld crt0.S core_*.c barebones/*.c -lgcc -o /tmp/prog.elf) > /tmp/out/prog.log 2>&1 ;;
+            cm1) (cd ../rtlref/rtl/tb/progs && mkdir -p build && sed -i 's/^timeout 300 spike/: spike/; s/^python3 mkmeta.py/: mkmeta/' build_cm.sh && bash build_cm.sh 1 && cp build/cm1.elf /tmp/prog.elf && riscv64-unknown-elf-gcc --version | head -1) > /tmp/out/prog.log 2>&1 ;;
             *) echo "unknown program $PROG"; exit 2 ;;
           esac || { echo "program BUILD FAILED ($PROG) (log in the encrypted bundle)"; exit 1; }
           echo "program $PROG built"
