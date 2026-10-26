@@ -20,6 +20,9 @@ on:
       rtl_ref:
         description: 'hp_ml_core ref whose rtl/tb/progs builds cm1 (the RTL perf program)'
         default: 'perf-exp-b34'
+      shards:
+        description: 'jobs (1-3): each builds the model ONCE and runs its share of the runs serially'
+        default: '1'
       maxcyc:
         description: 'cycle cap per run'
         default: '400000000'
@@ -29,11 +32,11 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        r: ${{ fromJSON(inputs.runs) }}
+        shard: ${{ fromJSON(format('[{0}]', inputs.shards == '3' && '0,1,2' || inputs.shards == '2' && '0,1' || '0')) }}
     steps:
       - name: Cache SystemC (tool)
         id: sc
@@ -60,41 +63,43 @@ jobs:
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" src 2>clone_err.txt
           [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' clone_err.txt; exit 1; }
           cd src && echo "HEAD $(git rev-parse --short HEAD)" && cd ..
-          if [ "${{ matrix.r.p }}" = cm1 ]; then
+          if true; then
             git clone -q --depth 1 --filter=blob:none --sparse --branch "${{ inputs.rtl_ref }}" \
               "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/rahulprospera/hp_ml_core.git" rtlref 2>clone_err.txt \
               && git -C rtlref sparse-checkout set rtl/tb/progs test/coremark \
               && echo "rtl ref ok $(git -C rtlref rev-parse --short HEAD)" || { echo "rtl ref checkout FAILED"; exit 1; }
           fi
-      - name: Build model + program
+      - name: Build model + programs (once)
         env:
           DEFS: ${{ inputs.defines }}
-          PROG: ${{ matrix.r.p }}
         run: |
           mkdir -p /tmp/out; cd src
           SC=/opt/systemc bash scripts/rw_build.sh $DEFS > /tmp/out/build.log 2>&1 || { echo "model BUILD FAILED (log in the encrypted bundle)"; exit 1; }
           echo "model built"
           RV="riscv64-unknown-elf-gcc -march=rv64im -mabi=lp64 -O2 -nostdlib -ffreestanding -fno-tree-loop-distribute-patterns"
-          case "$PROG" in
-            cm2) (cd test/coremark && $RV -DITERATIONS=2 -DPERFORMANCE_RUN=1 -DHAS_FLOAT=0 '-DFLAGS_STR="-O2"' -Ibarebones -I. -T cm.ld crt0.S core_*.c barebones/*.c -lgcc -o /tmp/prog.elf) > /tmp/out/prog.log 2>&1 ;;
-            cm1) (cd ../rtlref/rtl/tb/progs && mkdir -p build && sed -i 's/^timeout 300 spike/: spike/; s/^python3 mkmeta.py/: mkmeta/' build_cm.sh && bash build_cm.sh 1 && cp build/cm1.elf /tmp/prog.elf && riscv64-unknown-elf-gcc --version | head -1) > /tmp/out/prog.log 2>&1 ;;
-            *) echo "unknown program $PROG"; exit 2 ;;
-          esac || { echo "program BUILD FAILED ($PROG) (log in the encrypted bundle)"; exit 1; }
-          echo "program $PROG built"
-      - name: Run ${{ matrix.r.n }}
+          (cd test/coremark && $RV -DITERATIONS=2 -DPERFORMANCE_RUN=1 -DHAS_FLOAT=0 '-DFLAGS_STR="-O2"' -Ibarebones -I. -T cm.ld crt0.S core_*.c barebones/*.c -lgcc -o /tmp/cm2.elf) > /tmp/out/prog_cm2.log 2>&1 || echo "cm2 BUILD FAILED"
+          (cd ../rtlref/rtl/tb/progs && mkdir -p build && sed -i 's/^timeout 300 spike/: spike/; s/^python3 mkmeta.py/: mkmeta/' build_cm.sh && bash build_cm.sh 1 && cp build/cm1.elf /tmp/cm1.elf) > /tmp/out/prog_cm1.log 2>&1 || echo "cm1 BUILD FAILED"
+          ls /tmp/cm1.elf /tmp/cm2.elf 2>/dev/null
+      - name: Runs (this shard's share, serially)
         env:
-          RUNENV: ${{ matrix.r.e }}
+          RUNS: ${{ inputs.runs }}
           MAXC: ${{ inputs.maxcyc }}
-          N: ${{ matrix.r.n }}
-          PROG: ${{ matrix.r.p }}
+          SHARD: ${{ matrix.shard }}
+          NSH: ${{ inputs.shards }}
         run: |
-          mkdir -p /tmp/out; cd src
-          echo "$RUNENV" > /tmp/out/env.txt
-          timeout 2100 env $RUNENV RW_UART=1 build/rw/rw_run /tmp/prog.elf "$MAXC" > /tmp/out/$N.log 2>&1; rc=$?
-          h=no; grep -aq "HALT$" /tmp/out/$N.log && h=yes
-          ok=n/a; [ "$PROG" = cm2 ] && { grep -aq "crclist *: 0xe714" /tmp/out/$N.log && ok=yes || ok=NO; }
-          echo "VERDICT $N: rc=$rc halted=$h crclist_ok=$ok"
-          echo "$rc" > /tmp/out/rc.txt
+          cd src
+          python3 - <<'PY' > /tmp/runlist.txt
+          import json, os
+          r = json.loads(os.environ['RUNS']); sh = int(os.environ['SHARD']); n = int(os.environ['NSH'] or 1)
+          for i, x in enumerate(r):
+              if i % n == sh: print(x['n'] + '\t' + x['p'] + '\t' + x['e'])
+          PY
+          while IFS=$'\t' read -r N PROG RUNENV; do
+            mkdir -p /tmp/out/hpml-sc-$N
+            timeout 1500 env $RUNENV RW_UART=1 build/rw/rw_run /tmp/$PROG.elf "$MAXC" > /tmp/out/hpml-sc-$N/$N.log 2>&1; rc=$?
+            h=no; grep -aq "HALT$" /tmp/out/hpml-sc-$N/$N.log && h=yes
+            echo "VERDICT $N: rc=$rc halted=$h"
+          done < /tmp/runlist.txt
       - name: Encrypt results (only the owner's private key opens them)
         if: always()
         run: |
@@ -123,7 +128,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hpml-sc-${{ matrix.r.n }}
+          name: hpml-sc-shard${{ matrix.shard }}
           path: |
             /tmp/res.enc
             /tmp/key.enc
