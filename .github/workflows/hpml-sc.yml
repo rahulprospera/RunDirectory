@@ -87,6 +87,7 @@ jobs:
           SHARD: ${{ matrix.shard }}
           NSH: ${{ inputs.shards }}
         run: |
+          set +e   # a run that does not halt must not abort the runs after it
           cd src
           python3 - <<'PY' > /tmp/runlist.txt
           import json, os
