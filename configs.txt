@@ -1,5 +1,3 @@
-# name | rtl_core.json edits | `defines | harness plusargs      (all on HPML_FE_TGPRED=1)
-r7     |  | HPML_FE_TGPRED=1 HPML_FE_TGRW=7 HPML_FTQ_IDW=9 |
-r8     |  | HPML_FE_TGPRED=1 HPML_FE_TGRW=8 HPML_FTQ_IDW=10 |
-ts8    |  | HPML_FE_TGPRED=1 HPML_FE_TGPRED_S=8 HPML_FTQ_IDW=9 |
-allr8  |  | HPML_FE_TGPRED=1 HPML_FE_IQDX=20 HPML_FE_TGPRED_S=8 HPML_FE_XSTAGE=0 HPML_TAGE_ENTRIES=1024 HPML_FE_L2PARTS=4 HPML_FE_TGRW=8 HPML_FTQ_IDW=11 | +bpq=8 +tgp_base
+# name | rtl_core.json edits | `defines | harness plusargs   (fe-exp-b02 defaults, no overrides)
+b02     |  |  | +bpq=8
+b02nobpq |  |  |
