@@ -15,7 +15,7 @@ on:
         description: 'extra -D flags for the model build'
         default: ''
       runs:
-        description: 'JSON list of {"n":name,"p":cm2|cm1,"e":"ENV=.. ENV=.."}'
+        description: 'JSON list of {"n":name,"p":cm2|cm1|<file in test/xf_bins>,"e":"ENV=.. ENV=..","c":optional cycle cap}'
         default: '[{"n":"w2","p":"cm2","e":"RW_W=2"},{"n":"w4","p":"cm2","e":"RW_W=4"}]'
       rtl_ref:
         description: 'hp_ml_core ref whose rtl/tb/progs builds cm1 (the RTL perf program)'
@@ -79,7 +79,7 @@ jobs:
           RV="riscv64-unknown-elf-gcc -march=rv64im -mabi=lp64 -O2 -nostdlib -ffreestanding -fno-tree-loop-distribute-patterns"
           (cd test/coremark && $RV -DITERATIONS=2 -DPERFORMANCE_RUN=1 -DHAS_FLOAT=0 '-DFLAGS_STR="-O2"' -Ibarebones -I. -T cm.ld crt0.S core_*.c barebones/*.c -lgcc -o /tmp/cm2.elf) > /tmp/out/prog_cm2.log 2>&1 || echo "cm2 BUILD FAILED"
           (cd ../rtlref/rtl/tb/progs && mkdir -p build && sed -i 's/^timeout 300 spike/: spike/; s/^python3 mkmeta.py/: mkmeta/' build_cm.sh && bash build_cm.sh 1 && cp build/cm1.elf /tmp/cm1.elf) > /tmp/out/prog_cm1.log 2>&1 || echo "cm1 BUILD FAILED"
-          ls /tmp/cm1.elf /tmp/cm2.elf 2>/dev/null
+          cp test/xf_bins/* /tmp/ 2>/dev/null; ls /tmp/cm1.elf /tmp/cm2.elf 2>/dev/null
       - name: Runs (this shard's share, serially)
         env:
           RUNS: ${{ inputs.runs }}
@@ -93,11 +93,12 @@ jobs:
           import json, os
           r = json.loads(os.environ['RUNS']); sh = int(os.environ['SHARD']); n = int(os.environ['NSH'] or 1)
           for i, x in enumerate(r):
-              if i % n == sh: print(x['n'] + '\t' + x['p'] + '\t' + x['e'])
+              if i % n == sh: print(x['n'] + '\t' + x['p'] + '\t' + str(x.get('c', '')) + '\t' + x['e'])
           PY
-          while IFS=$'\t' read -r N PROG RUNENV; do
+          while IFS=$'\t' read -r N PROG CYC RUNENV; do
             mkdir -p /tmp/out/hpml-sc-$N
-            timeout 1500 env $RUNENV RW_UART=1 build/rw/rw_run /tmp/$PROG.elf "$MAXC" > /tmp/out/hpml-sc-$N/$N.log 2>&1; rc=$?
+            BIN=/tmp/$PROG; [ -f "$BIN" ] || BIN=/tmp/$PROG.elf      # a committed binary (test/xf_bins) or cm1 / cm2
+            timeout 1500 env $RUNENV RW_UART=1 build/rw/rw_run "$BIN" "${CYC:-$MAXC}" > /tmp/out/hpml-sc-$N/$N.log 2>&1; rc=$?
             h=no; grep -aq "HALT$" /tmp/out/hpml-sc-$N/$N.log && h=yes
             echo "VERDICT $N: rc=$rc halted=$h"
           done < /tmp/runlist.txt
