@@ -93,9 +93,9 @@ jobs:
           import json, os
           r = json.loads(os.environ['RUNS']); sh = int(os.environ['SHARD']); n = int(os.environ['NSH'] or 1)
           for i, x in enumerate(r):
-              if i % n == sh: print(x['n'] + '\t' + x['p'] + '\t' + str(x.get('c', '')) + '\t' + x['e'])
+              if i % n == sh: print(x['n'] + '|' + x['p'] + '|' + str(x.get('c', '')) + '|' + x['e'])   # '|': an EMPTY field survives (a tab IFS collapses it)
           PY
-          while IFS=$'\t' read -r N PROG CYC RUNENV; do
+          while IFS='|' read -r N PROG CYC RUNENV; do
             mkdir -p /tmp/out/hpml-sc-$N
             BIN=/tmp/$PROG; [ -f "$BIN" ] || BIN=/tmp/$PROG.elf      # a committed binary (test/xf_bins) or cm1 / cm2
             timeout 1500 env $RUNENV RW_UART=1 build/rw/rw_run "$BIN" "${CYC:-$MAXC}" > /tmp/out/hpml-sc-$N/$N.log 2>&1; rc=$?
