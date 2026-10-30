@@ -1,0 +1,80 @@
+name: fe-harness
+# FE agent (hp_ml_core fe-rethink): the front end's dispatch rate on tb_fe_harness (ideal sink), cm1 at W=2 / W=4.
+# PUSH-TRIGGERED ON THIS SIDE BRANCH ONLY (fe-harness-ci): a run = a commit that edits run.env.  Own concurrency group,
+# so it never touches the hpml-core queue.  Results are ENCRYPTED (AES-256 data key, RSA-4096 wrapped) to the FE agent's
+# key; the public log shows only rc / done.
+on:
+  push:
+    branches: [fe-harness-ci]
+permissions: { contents: read }
+concurrency: { group: fe-harness, cancel-in-progress: false }
+env:
+  REPO: rahulprospera/hp_ml_core
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy: { fail-fast: false, matrix: { w: [2, 4] } }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make g++ ccache rsync autoconf flex bison help2man \
+            libfl-dev zlib1g-dev numactl libgoogle-perftools-dev
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Clone private
+        run: |
+          set +e; . ./run.env
+          git clone --depth 1 --branch "$BRANCH" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: Harness W=${{ matrix.w }}
+        run: |
+          . ./run.env; export FEH_JSON FEH_DEFS FEH_PLUS
+          export PATH=/opt/verilator/bin:$PATH
+          cd src/rtl && bash flow/ci_tools/fe_harness_ci.sh ${{ matrix.w }} /tmp/out > /tmp/console.txt 2>&1
+          rc=$?; cp /tmp/console.txt /tmp/out/ 2>/dev/null; echo "W=${{ matrix.w }} rc=$rc (results in the encrypted bundle)"
+      - name: Encrypt results
+        if: always()
+        run: |
+          cat > /tmp/pub.pem <<'PUBKEY'
+          -----BEGIN PUBLIC KEY-----
+          MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAtyI3NZ3bW8EcFwd1jUaA
+          TDVgIW060ge7zO9xwZDW38/PmRylVTMtNmWdRltIsTz59v5kmEQdHiIBgRXBA2UH
+          S1xXUOfBRPuySEEVUPLRUvOVFL8snGYUgLGeKK3BvOLd0XZ3mDDa45/laP2XwrSH
+          AudfOTRLPN621g1W4ZjnWhbKjab9CAJV6JzW/yr4fCF1rJ49E8sdbalM0hXMnp5U
+          we1njdGv4B8tDLnvy+zZIPasAVaiAxy+Ic0C/Z9LPXbEkXcllDmxEvn0BTwdkxIi
+          CU/7DbS0WZHTmn49JLK74sOyWcR7IX86A+SNyHH3p3dBkdWREe/VHePO8HZ484Ws
+          Xap8hIoBxLA7IXnnHU5bY5dtxs24K/eEumBZwcdLqdvJsoGd5n2omQdSXI7TATHb
+          u1C4iLKQYQcENc5CG5K91dmUn5mnY5wx/ZChYrBAyOT1ETHkCkq6qpZdaec702is
+          8Xz6JBmeQ4MWsEec0CchJ6yXLckArkI/2xm9tG1V3q7WaoyO4iIeSlcYXAJCCUcX
+          UTzRI4XpeFiWOViQY2RXiDM00mNnXbDsRMLCQqI/7JWvriQPYF+C1VyE1CXuNhZI
+          tv4d+uPSgsAV1v2bpASeFLb6pmQBkgH2JFDRJNbGIze8lpCzTxJjzUwLitNgUBHZ
+          hAzFoeuBKw3GHhmGa0jL8v8CAwEAAQ==
+          -----END PUBLIC KEY-----
+          PUBKEY
+          sed -i 's/^ *//' /tmp/pub.pem
+          mkdir -p /tmp/out; cp run.env /tmp/out/
+          cd /tmp && tar czf out.tgz out
+          export K=$(openssl rand -hex 32)
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:K -in out.tgz -out res.enc
+          printf %s "$K" | openssl pkeyutl -encrypt -pubin -inkey pub.pem -pkeyopt rsa_padding_mode:oaep -out key.enc
+          unset K; rm -rf out.tgz out console.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fe-harness-w${{ matrix.w }}
+          path: |
+            /tmp/res.enc
+            /tmp/key.enc
+          retention-days: 14
