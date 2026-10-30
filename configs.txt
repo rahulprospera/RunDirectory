@@ -1,0 +1,9 @@
+# name | rtl_core.json edits | `defines | harness plusargs      (all on HPML_FE_TGPRED=1)
+base  |                  | HPML_FE_TGPRED=1                       |
+bpq   |                  | HPML_FE_TGPRED=1                       | +bpq=8
+iq2x  |                  | HPML_FE_TGPRED=1 HPML_FE_IQDX=20       |
+ts4   |                  | HPML_FE_TGPRED=1 HPML_FE_TGPRED_S=4    |
+ts8   |                  | HPML_FE_TGPRED=1 HPML_FE_TGPRED_S=8    |
+xst0  |                  | HPML_FE_TGPRED=1 HPML_FE_XSTAGE=0      |
+t1k   | tage_entries=1024 | HPML_FE_TGPRED=1                      | +tgp_base
+all   | tage_entries=1024 | HPML_FE_TGPRED=1 HPML_FE_IQDX=20 HPML_FE_TGPRED_S=4 HPML_FE_XSTAGE=0 | +bpq=8 +tgp_base

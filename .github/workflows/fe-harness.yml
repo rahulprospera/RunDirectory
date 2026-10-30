@@ -1,6 +1,7 @@
 name: fe-harness
 # FE agent (hp_ml_core fe-rethink): the front end's dispatch rate on tb_fe_harness (ideal sink), cm1 at W=2 / W=4.
-# PUSH-TRIGGERED ON THIS SIDE BRANCH ONLY (fe-harness-ci): a run = a commit that edits run.env.  Own concurrency group,
+# PUSH-TRIGGERED ON THIS SIDE BRANCH ONLY (fe-harness-ci): a run = a commit that edits run.env.  run.env names the
+# hp_ml_core BRANCH; configs.txt lists the configs, one per line "name|json|defs|plus" (each runs at W=2 and W=4).  Own concurrency group,
 # so it never touches the hpml-core queue.  Results are ENCRYPTED (AES-256 data key, RSA-4096 wrapped) to the FE agent's
 # key; the public log shows only rc / done.
 on:
@@ -11,10 +12,19 @@ concurrency: { group: fe-harness, cancel-in-progress: false }
 env:
   REPO: rahulprospera/hp_ml_core
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs: { cfgs: "${{ steps.p.outputs.cfgs }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        run: |
+          python3 -c "import json; L=[l.split('|')[0].strip() for l in open('configs.txt') if l.strip() and not l.startswith('#')]; print('cfgs='+json.dumps(L))" >> $GITHUB_OUTPUT
   run:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    strategy: { fail-fast: false, matrix: { w: [2, 4] } }
+    strategy: { fail-fast: false, max-parallel: 12, matrix: { w: [2, 4], cfg: "${{ fromJSON(needs.plan.outputs.cfgs) }}" } }
     steps:
       - uses: actions/checkout@v4
       - name: Cache Verilator
@@ -38,9 +48,12 @@ jobs:
           git clone --depth 1 --branch "$BRANCH" \
             "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
           [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
-      - name: Harness W=${{ matrix.w }}
+      - name: Harness ${{ matrix.cfg }} W=${{ matrix.w }}
         run: |
-          . ./run.env; export FEH_JSON FEH_DEFS FEH_PLUS
+          set +e; . ./run.env
+          IFS='|' read -r _n FEH_JSON FEH_DEFS FEH_PLUS < <(grep -E "^\s*${{ matrix.cfg }}\s*\|" configs.txt | head -1)
+          FEH_JSON=$(echo $FEH_JSON); FEH_DEFS=$(echo $FEH_DEFS); FEH_PLUS=$(echo $FEH_PLUS)
+          export FEH_JSON FEH_DEFS FEH_PLUS
           export PATH=/opt/verilator/bin:$PATH
           cd src/rtl && bash flow/ci_tools/fe_harness_ci.sh ${{ matrix.w }} /tmp/out > /tmp/console.txt 2>&1
           rc=$?; cp /tmp/console.txt /tmp/out/ 2>/dev/null; echo "W=${{ matrix.w }} rc=$rc (results in the encrypted bundle)"
@@ -64,7 +77,7 @@ jobs:
           -----END PUBLIC KEY-----
           PUBKEY
           sed -i 's/^ *//' /tmp/pub.pem
-          mkdir -p /tmp/out; cp run.env /tmp/out/
+          mkdir -p /tmp/out; cp run.env configs.txt /tmp/out/
           cd /tmp && tar czf out.tgz out
           export K=$(openssl rand -hex 32)
           openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:K -in out.tgz -out res.enc
@@ -73,7 +86,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: fe-harness-w${{ matrix.w }}
+          name: fe-harness-${{ matrix.cfg }}-w${{ matrix.w }}
           path: |
             /tmp/res.enc
             /tmp/key.enc
