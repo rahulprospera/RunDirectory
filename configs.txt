@@ -1,3 +1,2 @@
-# name | json | defines | plusargs
-base |  | HPML_FE_TGPRED=1 |
-all  |  | HPML_FE_TGPRED=1 HPML_FE_IQDX=20 HPML_FE_TGPRED_S=4 HPML_FE_XSTAGE=0 HPML_TAGE_ENTRIES=1024 HPML_FE_TGBASE=1 HPML_FE_L2PARTS=4 HPML_BPQ=1 |
+# name | json | defines | plusargs   (fe-merge defaults)
+merge |  |  |
