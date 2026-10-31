@@ -1,3 +1,4 @@
 # name | json | defines | plusargs
-ideal |  |  |
-core |  |  | +core
+base |  |  |
+ref |  | HPML_FE_TGREF=1 |
+refc |  | HPML_FE_TGREF=1 | +core
