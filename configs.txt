@@ -1,3 +1,5 @@
 # name | json | defines | plusargs
-base |  |  |
-core |  |  | +core
+dcpl |  | HPML_FE_DCPL=1 HPML_FE_DCPL_BYP=1 |
+dcplcore |  | HPML_FE_DCPL=1 HPML_FE_DCPL_BYP=1 | +core
+pgx |  | HPML_FE_DCPL=1 HPML_FE_DCPL_BYP=1 HPML_FE_DCPL_PGX=1 |
+pgxcore |  | HPML_FE_DCPL=1 HPML_FE_DCPL_BYP=1 HPML_FE_DCPL_PGX=1 | +core
