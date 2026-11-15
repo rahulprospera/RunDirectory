@@ -14,6 +14,7 @@ on:
       data:    { description: 'hp_ml_core data branch', default: 'boot-replay/win500k-6.1' }
       cycles:  { description: 'RTL cycles per window', default: '1000000' }
       windows: { description: 'JSON list of window dirs, or all', default: 'all' }
+      hext:    { description: 'H extension: 1 = RTL built with rtl_core.json "hext": 1 + co-sim Spike with H (WO-081 windows)', default: '0' }
 permissions: { contents: read }
 # Its own group: never queues behind, or cancels, another agent's hpml-core run.
 concurrency: { group: hpml-boot-replay, cancel-in-progress: false }
@@ -73,12 +74,14 @@ jobs:
           export PATH=/opt/verilator/bin:$PATH
           cd src/rtl
           grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
-          python3 - config/rtl_core.json 2 <<'PY'
+          python3 - config/rtl_core.json 2 "${{ inputs.hext }}" <<'PY'
           import json,sys
-          p,w=sys.argv[1],int(sys.argv[2]); c=json.load(open(p)); c["issue_width"]=w
+          p,w,h=sys.argv[1],int(sys.argv[2]),int(sys.argv[3]); c=json.load(open(p)); c["issue_width"]=w
+          if h: c["hext"]=1          # the hext=1 arm (WO-081); 0 leaves the JSON exactly as before
           json.dump(c,open(p,"w"),indent=2)
           PY
           python3 flow/gen_rtl_config.py >/dev/null
+          echo "hext=${{ inputs.hext }}: $(grep -m1 'define HPML_HEXT ' hpml_cfg.vh)"
           mkdir -p build/w
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
@@ -142,6 +145,8 @@ jobs:
       - name: Replay ${{ matrix.w }}
         run: |
           chmod +x sim/tb
+          # the co-sim Spike runs the window's ISA: H on for the hext=1 arm (cosim_window.sh reads HPML_SPIKE_ISA)
+          if [ "${{ inputs.hext }}" = "1" ]; then export HPML_SPIKE_ISA=rv64imah_zicsr_zifencei_zicntr; fi
           bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
             "${{ inputs.cycles }}" "$PWD/out"
       - uses: actions/upload-artifact@v4
@@ -165,5 +170,5 @@ jobs:
         run: |
           cat v/*/summary.txt 2>/dev/null | sort -t_ -k2 -n > all.txt
           n=$(wc -l < all.txt); p=$(grep '| MATCH' all.txt | grep -vc WEDGE || true); w=$(grep -c 'WEDGE' all.txt || true)
-          { echo "## Boot replay: PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## Boot replay (hext=${{ inputs.hext }}): PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "PASS $p / $n"; cat all.txt
