@@ -146,7 +146,7 @@ jobs:
         run: |
           chmod +x sim/tb
           # the co-sim Spike runs the window's ISA: H on for the hext=1 arm (cosim_window.sh reads HPML_SPIKE_ISA)
-          if [ "${{ inputs.hext }}" = "1" ]; then export HPML_SPIKE_ISA=rv64imah_zicsr_zifencei_zicntr; fi
+          if [ "${{ inputs.hext }}" = "1" ]; then export HPML_SPIKE_ISA=rv64imah_zicsr_zifencei_zicntr_svadu; fi
           bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
             "${{ inputs.cycles }}" "$PWD/out"
       - uses: actions/upload-artifact@v4
