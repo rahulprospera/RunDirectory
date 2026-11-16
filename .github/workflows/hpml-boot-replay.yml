@@ -77,11 +77,12 @@ jobs:
           python3 - config/rtl_core.json 2 "${{ inputs.hext }}" <<'PY'
           import json,sys
           p,w,h=sys.argv[1],int(sys.argv[2]),int(sys.argv[3]); c=json.load(open(p)); c["issue_width"]=w
-          if h: c["hext"]=1          # the hext=1 arm (WO-081); 0 leaves the JSON exactly as before
+          if h: c["rtl_only"]["hext"]=1   # the hext=1 arm (WO-081): gen_rtl_config reads rtl_only.hext; 0 leaves the JSON exactly as before
           json.dump(c,open(p,"w"),indent=2)
           PY
           python3 flow/gen_rtl_config.py >/dev/null
           echo "hext=${{ inputs.hext }}: $(grep -m1 'define HPML_HEXT ' hpml_cfg.vh)"
+          if [ "${{ inputs.hext }}" = "1" ] && ! grep -qE 'define HPML_HEXT +1' hpml_cfg.vh; then echo "::error::hext=1 requested but HPML_HEXT is not 1"; exit 1; fi
           mkdir -p build/w
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
