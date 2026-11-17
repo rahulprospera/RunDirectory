@@ -15,6 +15,7 @@ on:
       cycles:  { description: 'RTL cycles per window', default: '1000000' }
       windows: { description: 'JSON list of window dirs, or all', default: 'all' }
       hext:    { description: 'H extension: 1 = RTL built with rtl_core.json "hext": 1 + co-sim Spike with H (WO-081 windows)', default: '0' }
+      ncore:   { description: 'harts: 1 = today; 2 = the dual-core shell (l1-dual) + DUT-driven Spike -p2 co-sim (ci_window_2h.sh, WO-081 C)', default: '1' }
 permissions: { contents: read }
 # Its own group: never queues behind, or cancels, another agent's hpml-core run.
 concurrency: { group: hpml-boot-replay, cancel-in-progress: false }
@@ -73,7 +74,13 @@ jobs:
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd src/rtl
-          grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
+          if [ "${{ inputs.ncore }}" = "2" ]; then
+            # the dual-core shell: HPML_TB_BOOT by define; H-on keeps the data MMU at HPIPE 1 until WO-103 lands
+            XDEF="+define+HPML_TB_BOOT +define+HPML_NCORE=2 +define+HPML_MID_DMMU_HPIPE=1"; XDIR="-y top"
+          else
+            XDEF=""; XDIR=""
+            grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
+          fi
           python3 - config/rtl_core.json 2 "${{ inputs.hext }}" <<'PY'
           import json,sys
           p,w,h=sys.argv[1],int(sys.argv[2]),int(sys.argv[3]); c=json.load(open(p)); c["issue_width"]=w
@@ -87,7 +94,7 @@ jobs:
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
             -j "$(nproc)" --top-module tb_m5_program \
-            -y prim -y atoms -y leaves -y cluster -y tb \
+            -y prim -y atoms -y leaves -y cluster -y tb $XDIR $XDEF \
             --Mdir build/w -o tb tb/tb_m5_program.sv
       - uses: actions/upload-artifact@v4
         with: { name: boot-sim-w2, path: src/rtl/build/w/tb, retention-days: 3 }
@@ -106,7 +113,7 @@ jobs:
       - name: Cache co-sim Spike
         id: sc
         uses: actions/cache@v4
-        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-u2404" }
+        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-n${{ inputs.ncore }}-${{ inputs.ncore == '2' && hashFiles('src/test/boot_replay/spike_cosim2h.patch') || '0' }}-u2404" }
       - name: Build co-sim Spike (miss only)
         if: steps.sc.outputs.cache-hit != 'true'
         run: |
@@ -115,6 +122,7 @@ jobs:
           git clone https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk && cd /tmp/spk
           git checkout 16c0b60
           git apply "$GITHUB_WORKSPACE/src/test/boot_replay/spike_hpml_full.patch"
+          if [ "${{ inputs.ncore }}" = "2" ]; then git apply "$GITHUB_WORKSPACE/src/test/boot_replay/spike_cosim2h.patch"; fi
           mkdir build && cd build && ../configure --prefix=/opt/spike-hpml && make -j"$(nproc)" && sudo make install
           test -x /opt/spike-hpml/bin/spike || { echo "SPIKE DID NOT INSTALL"; exit 1; }
 
@@ -138,7 +146,7 @@ jobs:
           done
       - name: Restore co-sim Spike
         uses: actions/cache/restore@v4
-        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-u2404", fail-on-cache-miss: true }
+        with: { path: /opt/spike-hpml, key: "spike-hpml-16c0b60-${{ hashFiles('src/test/boot_replay/spike_hpml_full.patch') }}-n${{ inputs.ncore }}-${{ inputs.ncore == '2' && hashFiles('src/test/boot_replay/spike_cosim2h.patch') || '0' }}-u2404", fail-on-cache-miss: true }
       - uses: actions/download-artifact@v4
         with: { name: boot-sim-w2, path: sim }
       - name: deps
@@ -148,8 +156,13 @@ jobs:
           chmod +x sim/tb
           # the co-sim Spike runs the window's ISA: H on for the hext=1 arm (cosim_window.sh reads HPML_SPIKE_ISA)
           if [ "${{ inputs.hext }}" = "1" ]; then export HPML_SPIKE_ISA=rv64imah_zicsr_zifencei_zicntr_svadu; fi
-          bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
-            "${{ inputs.cycles }}" "$PWD/out"
+          if [ "${{ inputs.ncore }}" = "2" ]; then
+            bash src/test/boot_replay/ci_window_2h.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
+              "$PWD/data/image/fw_payload.elf" "${{ inputs.cycles }}" "$PWD/out"
+          else
+            bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
+              "${{ inputs.cycles }}" "$PWD/out"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -170,6 +183,8 @@ jobs:
       - name: Score
         run: |
           cat v/*/summary.txt 2>/dev/null | sort -t_ -k2 -n > all.txt
-          n=$(wc -l < all.txt); p=$(grep '| MATCH' all.txt | grep -vc WEDGE || true); w=$(grep -c 'WEDGE' all.txt || true)
-          { echo "## Boot replay (hext=${{ inputs.hext }}): PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          n=$(wc -l < all.txt); w=$(grep -c 'WEDGE' all.txt || true)
+          if [ "${{ inputs.ncore }}" = "2" ]; then p=$(grep '| h0 MATCH' all.txt | grep '| h1 MATCH' | grep -vc 'WEDGE' || true)
+          else p=$(grep '| MATCH' all.txt | grep -vc WEDGE || true); fi
+          { echo "## Boot replay (hext=${{ inputs.hext }}, ncore=${{ inputs.ncore }}): PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "PASS $p / $n"; cat all.txt
