@@ -18,7 +18,7 @@ on:
       ncore:   { description: 'harts: 1 = today; 2 = the dual-core shell (l1-dual) + DUT-driven Spike -p2 co-sim (ci_window_2h.sh, WO-081 C)', default: '1' }
 permissions: { contents: read }
 # Its own group: never queues behind, or cancels, another agent's hpml-core run.
-concurrency: { group: hpml-boot-replay, cancel-in-progress: false }
+concurrency: { group: 'hpml-boot-replay-n${{ inputs.ncore }}', cancel-in-progress: false }   # 1-hart and 2-hart runs never block each other
 
 env:
   REPO: rahulprospera/hp_ml_core
