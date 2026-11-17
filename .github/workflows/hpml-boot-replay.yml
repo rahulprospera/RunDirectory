@@ -47,7 +47,7 @@ jobs:
   # ---------------------------------------------------------------- the W=2 boot-replay sim, once
   sim:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 180          # the 2-hart build (ncore=2) is ~1 h
     steps:
       - name: Cache Verilator
         id: vc
@@ -76,7 +76,7 @@ jobs:
           cd src/rtl
           if [ "${{ inputs.ncore }}" = "2" ]; then
             # the dual-core shell: HPML_TB_BOOT by define; H-on keeps the data MMU at HPIPE 1 until WO-103 lands
-            XDEF="+define+HPML_TB_BOOT +define+HPML_NCORE=2 +define+HPML_MID_DMMU_HPIPE=1"; XDIR="-y top"
+            XDEF="--hierarchical +define+HPML_SOC_HIER +define+HPML_TB_NOPROBE +define+HPML_TB_BOOT +define+HPML_NCORE=2"; XDIR="-y top"   # core compiled once (the shell hier mode); WO-103 fixed, so no HPIPE override
           else
             XDEF=""; XDIR=""
             grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
