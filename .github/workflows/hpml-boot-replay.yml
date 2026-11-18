@@ -76,9 +76,9 @@ jobs:
           cd src/rtl
           if [ "${{ inputs.ncore }}" = "2" ]; then
             # the dual-core shell: HPML_TB_BOOT by define; H-on keeps the data MMU at HPIPE 1 until WO-103 lands
-            XDEF="--hierarchical +define+HPML_SOC_HIER +define+HPML_TB_NOPROBE +define+HPML_TB_BOOT +define+HPML_NCORE=2"; XDIR="-y top"   # core compiled once (the shell hier mode); WO-103 fixed, so no HPIPE override
+            XDEF="--hierarchical +define+HPML_SOC_HIER +define+HPML_TB_NOPROBE +define+HPML_TB_BOOT +define+HPML_NCORE=2"; XDIR="-y top"; VJ=1   # -j 1: the 2-hart C++ compile is ~6.5 GB per job (4-way OOM-killed the runner, run 44225047847); core compiled once (the shell hier mode); WO-103 fixed, so no HPIPE override
           else
-            XDEF=""; XDIR=""
+            XDEF=""; XDIR=""; VJ=$(nproc)
             grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
           fi
           python3 - config/rtl_core.json 2 "${{ inputs.hext }}" <<'PY'
@@ -93,7 +93,7 @@ jobs:
           mkdir -p build/w
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
-            -j "$(nproc)" --top-module tb_m5_program \
+            -j "$VJ" --top-module tb_m5_program \
             -y prim -y atoms -y leaves -y cluster -y tb $XDIR $XDEF \
             --Mdir build/w -o tb tb/tb_m5_program.sv
       - uses: actions/upload-artifact@v4
