@@ -87,7 +87,6 @@ jobs:
           echo "build rc=$rc in $(( ($(date +%s)-s)/60 )) min; errors $(grep -c '^%Error' /tmp/build.log)"
           grep '^%Error' /tmp/build.log | sed -E 's/^(%Error[^:]*: [^:]+:[0-9]+).*/\1/' | head -10
           grep -q 'Can.t write' /tmp/build.log && df -h / /mnt | tail -2
-          [ $rc = 0 ] || grep -E '^%(Error|Warning-[A-Z]+:)' /tmp/build.log | grep -v '^%Warning' | cut -c1-160 | head -12
           exit $rc
       - name: Run every kernel, judge every hart
         run: |
