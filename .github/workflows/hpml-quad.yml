@@ -15,6 +15,7 @@ on:
       hier:    { description: '1 = ONE core build, N instances (--hierarchical, HPML_SOC_HIER + TB_NOPROBE); 0 = flat (N copies, ~N x build)', default: '1' }
       defines: { description: 'extra +define+ / -D flags', default: '' }
       maxcyc:  { description: 'per-kernel cycle cap', default: '2000000' }
+      suite:   { description: '2h = N-hart d/q kernels (build_2h); 1h = the 1-hart t-kernel ladder + cm1 (build_kern, diff_retire) -- the integ-l1 1-hart milestone set', default: '2h' }
 permissions: { contents: read }
 concurrency: { group: 'hpml-quad-${{ inputs.branch }}-n${{ inputs.ncore }}-${{ inputs.hier }}-${{ inputs.defines }}', cancel-in-progress: false }
 env:
@@ -67,6 +68,12 @@ jobs:
         run: |
           export PATH=/opt/spike/bin:$PATH
           cd src/rtl
+          if [ "${{ inputs.suite }}" = 1h ]; then
+            K1="t20_csr_legal t22_time_rate t24_meip t25_fence_io t26_fault_ctlcsr t27_mtime_agree t28_mret_sv39 t29_sv39_highva t30_st_ld_ret t31_line_merge t32_ldhp_drain t33_cold_line t34_wcb_churn t35_ff_mispredict t39_h_csr t40_h_vmode t41_h_priv t42_priv_tsr t44_h_cnt t45_h_gstage t46_h_gstage2 t47_h_gad t48_h_time t49_h_hlv t50_mprv t51_h_mprv t53_pf_jal_wedge t54_h_vsad_g t55_h_gsuper t56_h_hfence t57_h_vinst t59_h_gtval t60_h_mxr t61_amo_pf t62_cen t62_h_cen t63_clint_rd2 t63_csrdlv t64_sc_wport t65_br_badf3 t66_sc_fail t70_medeleg_warl t71_sysrsv"
+            bash tb/progs/build_kern.sh $K1 > /tmp/kb.log 2>&1 || true; bash tb/progs/build_cm.sh 1 >> /tmp/kb.log 2>&1 || true
+            n=$(ls tb/progs/build/kern/t*.ref 2>/dev/null | wc -l); echo "1h images: $n t-kernels + cm1 $([ -s tb/progs/build/cm1.hex ] && echo yes || echo NO)"
+            exit 0
+          fi
           NH=${{ inputs.ncore }} bash tb/progs/build_2h.sh ${{ inputs.kernels }} > /tmp/kb.log 2>&1 || true
           d=build/dual; [ "${{ inputs.ncore }}" != 2 ] && d=build/quad
           n=0; for k in ${{ inputs.kernels }}; do [ -s tb/progs/$d/$k.hex ] && n=$((n+1)) || echo "NO IMAGE: $k"; done
@@ -91,6 +98,24 @@ jobs:
       - name: Run every kernel, judge every hart
         run: |
           cd src/rtl
+          if [ "${{ inputs.suite }}" = 1h ]; then
+            one1(){ k=$1; L=/tmp/run1_$k.log
+              if [ $k = cm1 ]; then nm=cm1; ar="+maxcyc=4000000 +l2u +mlat=0 +mjit=0 +ldorc"; ref=tb/progs/build/cm1.ref; rr=tb/progs/build/cm1.rtl.retire
+              else nm=kern/$k; ar="+ntrap=$(grep -ciE 'exception|trap_|interrupt' tb/progs/build/kern/$k.spike 2>/dev/null)"; ref=tb/progs/build/kern/$k.ref; rr=tb/progs/build/kern/$k.rtl.retire; fi
+              timeout 3600 /mnt/rtlbuild/q/tb +name=$nm $ar > $L 2>&1; trc=$?
+              st=$(grep -oE 'self-test [A-Z]+' $L | head -1 | cut -d' ' -f2); cyc=$(grep -m1 -E '^  cycles ' $L | awk '{print $2}')
+              dv=$(python3 flow/diff_retire.py $ref $rr 2>&1 | grep -oE 'CLEAN|MISMATCH|LENGTH MISMATCH|ERROR' | head -1)
+              ok=FAIL; [ "$st" = PASS ] && ok=PASS
+              printf "%-18s %-4s self-test=%-5s cyc=%-9s tb_rc=%-3s spike=%s\n" $k $ok "${st:-NONE}" "${cyc:--}" "$trc" "${dv:-none}"
+              [ $ok = PASS ] || grep -m3 -E '^(FAIL|%Error|%Fatal|ERROR)|[Aa]ssert|wall-clock|L1RTL' $L | cut -c1-150 | sed "s/^/    $k: /"; }
+            export -f one1
+            ( for r in tb/progs/build/kern/t*.ref; do basename $r .ref; done; echo cm1 ) | xargs -P 3 -I{} bash -c 'one1 {}' | sort > /tmp/tab
+            cat /tmp/tab
+            p=$(grep -c ' PASS ' /tmp/tab); n=$(wc -l < /tmp/tab); c=$(grep -c 'spike=CLEAN' /tmp/tab)
+            echo "known non-CLEAN on the 1-hart milestone (mem_model AND L1RTL): t22 t25 t27 t39 t62_cen t70"
+            { echo "## 1h suite NCORE=${{ inputs.ncore }} ${{ inputs.defines }}: self-test PASS $p / $n, Spike CLEAN $c"; echo '```'; cat /tmp/tab; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "RUNS $n / PASS $p / CLEAN $c"; [ "$p" = "$n" ]; exit $?
+          fi
           d=dual; [ "${{ inputs.ncore }}" != 2 ] && d=quad
           one(){ k=$1; L=/tmp/run_$k.log
             timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 > $L 2>&1; trc=$?
