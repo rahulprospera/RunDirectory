@@ -1,0 +1,107 @@
+name: hpml-quad
+# PUBLIC runner-shell.  NO RTL COMMITTED HERE.  Clones the PRIVATE hp_ml_core at runtime via a
+# read-only token.  THE NCORE=4 GATE (owner 11-21: NC=4 runs only in CI; the Mac does NC<=2).
+#
+# One job: build the N-hart kernels (crt0_2h + kernel, Spike -p4 as the reference), build tb_m5_program
+# at HPML_NCORE=4 (H on), run every kernel, judge EVERY hart's retire stream vs Spike (flow/diff_2h.py).
+# A kernel PASSES only with "self-test PASS" AND every hart CLEAN.
+# VERDICT-ONLY (public logs): per-kernel PASS/FAIL + cycles + hart verdicts, nothing else; no artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:  { description: 'hp_ml_core branch', default: 'integ-l1-2h' }
+      ncore:   { description: 'harts', default: '4' }
+      kernels: { description: 'kernels (space separated)', default: 'd1_ipi d1b_clintrd d1c_clinthole d1s_rd d1s_rd2 d2_prodcons d3_lrsc_amo d3a_amo d3b_lrsc d3s_sc1 d4_falseshare d5_shootdown d5b_poll d6_h_shoot d7_clint_xwr q1_ipi_ring q2_amo q3_lrsc' }
+      hier:    { description: '1 = --hierarchical (core compiled once, HPML_SOC_HIER); 0 = flat', default: '1' }
+      defines: { description: 'extra +define+ / -D flags', default: '' }
+      maxcyc:  { description: 'per-kernel cycle cap', default: '2000000' }
+permissions: { contents: read }
+concurrency: { group: 'hpml-quad-${{ inputs.branch }}-n${{ inputs.ncore }}-${{ inputs.hier }}-${{ inputs.defines }}', cancel-in-progress: false }
+env:
+  REPO: rahulprospera/hp_ml_core
+jobs:
+  quad:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Restore Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Restore spike
+        id: sc
+        uses: actions/cache@v4
+        with: { path: /opt/spike, key: spike-riscv-isa-sim-u2404-master2 }
+      - name: Deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache help2man libfl-dev zlib1g-dev \
+            device-tree-compiler gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Build spike (miss only)
+        if: steps.sc.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/riscv-software-src/riscv-isa-sim /tmp/spk
+          mkdir -p /tmp/spk/build && cd /tmp/spk/build
+          ../configure --prefix=/opt/spike && make -j"$(nproc)" && sudo make install
+      - name: Free disk, add swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup || true
+          sudo mkdir -p /mnt/rtlbuild && sudo chown -R "$(id -u):$(id -g)" /mnt/rtlbuild
+          sudo fallocate -l 16G /mnt/swapq && sudo chmod 600 /mnt/swapq && sudo mkswap /mnt/swapq >/dev/null && sudo swapon /mnt/swapq || true
+          df -h / /mnt | tail -2; free -g | head -3
+      - name: Checkout PRIVATE repo
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          cd src && echo "HEAD $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s | cut -c1-100)"
+      - name: Build the ${{ inputs.ncore }}-hart kernels (Spike -p${{ inputs.ncore }} reference)
+        run: |
+          export PATH=/opt/spike/bin:$PATH
+          cd src/rtl
+          NH=${{ inputs.ncore }} bash tb/progs/build_2h.sh ${{ inputs.kernels }} > /tmp/kb.log 2>&1 || true
+          d=build/dual; [ "${{ inputs.ncore }}" != 2 ] && d=build/quad
+          n=0; for k in ${{ inputs.kernels }}; do [ -s tb/progs/$d/$k.hex ] && n=$((n+1)) || echo "NO IMAGE: $k"; done
+          echo "images $n / $(echo ${{ inputs.kernels }} | wc -w)"; grep -c 'BUILD FAIL\|spike exit' /tmp/kb.log | sed 's/^/kernel build problems: /'
+      - name: Build tb_m5_program @ NCORE=${{ inputs.ncore }}
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src/rtl
+          H=""; [ "${{ inputs.hier }}" = 1 ] && H="--hierarchical +define+HPML_SOC_HIER"
+          s=$(date +%s)
+          # -j 1: the 2-hart C++ compile is ~6.5 GB per job (boot-replay OOM, run 44225047847)
+          verilator --binary --timing -Wall -Wno-fatal -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
+            $H +define+HPML_HEXT=1 +define+HPML_NCORE=${{ inputs.ncore }} ${{ inputs.defines }} \
+            -j 1 --top-module tb_m5_program -y prim -y atoms -y leaves -y cluster -y tb -y top \
+            --Mdir /mnt/rtlbuild/q -o tb tb/tb_m5_program.sv > /tmp/build.log 2>&1
+          rc=$?
+          echo "build rc=$rc in $(( ($(date +%s)-s)/60 )) min; errors $(grep -c '^%Error' /tmp/build.log)"
+          grep '^%Error' /tmp/build.log | sed -E 's/^(%Error[^:]*: [^:]+:[0-9]+).*/\1/' | head -10
+          grep -q 'Can.t write' /tmp/build.log && df -h / /mnt | tail -2
+          exit $rc
+      - name: Run every kernel, judge every hart
+        run: |
+          cd src/rtl
+          d=dual; [ "${{ inputs.ncore }}" != 2 ] && d=quad
+          one(){ k=$1; L=/tmp/run_$k.log
+            timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 > $L 2>&1
+            st=$(grep -oE 'self-test [A-Z]+' $L | head -1 | cut -d' ' -f2); cyc=$(grep -m1 -E '^  cycles ' $L | awk '{print $2}')
+            python3 flow/diff_2h.py $k --dir $2 > /tmp/d_$k.txt 2>&1; drc=$?
+            v=$(grep -oE '\[[a-z0-9_]+ h[0-9]+\] CLEAN' /tmp/d_$k.txt | sed -E 's/\[[a-z0-9_]+ (h[0-9]+)\] CLEAN/\1/' | tr '\n' ' ')
+            ok=FAIL; [ "$st" = PASS ] && [ "$drc" = 0 ] && [ -n "$v" ] && ok=PASS
+            v="clean: ${v:-none} diff_rc=$drc"
+            printf "%-15s %-4s self-test=%-5s cyc=%-9s %s\n" $k $ok "${st:-NONE}" "${cyc:--}" "$v"; }
+          export -f one
+          for k in ${{ inputs.kernels }}; do echo "$k $d ${{ inputs.maxcyc }}"; done | xargs -P 3 -L1 bash -c 'one $0 $1 $2' | sort > /tmp/tab
+          cat /tmp/tab
+          p=$(grep -c ' PASS ' /tmp/tab); n=$(echo ${{ inputs.kernels }} | wc -w)
+          { echo "## NCORE=${{ inputs.ncore }} on ${{ inputs.branch }}: PASS $p / $n"; echo '```'; cat /tmp/tab; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "RUNS $n / PASS $p"; [ "$p" = "$n" ]
