@@ -93,13 +93,15 @@ jobs:
           cd src/rtl
           d=dual; [ "${{ inputs.ncore }}" != 2 ] && d=quad
           one(){ k=$1; L=/tmp/run_$k.log
-            timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 > $L 2>&1
+            timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 > $L 2>&1; trc=$?
             st=$(grep -oE 'self-test [A-Z]+' $L | head -1 | cut -d' ' -f2); cyc=$(grep -m1 -E '^  cycles ' $L | awk '{print $2}')
             python3 flow/diff_2h.py $k --dir $2 > /tmp/d_$k.txt 2>&1; drc=$?
             v=$(grep -oE '\[[a-z0-9_]+ h[0-9]+\] CLEAN' /tmp/d_$k.txt | sed -E 's/\[[a-z0-9_]+ (h[0-9]+)\] CLEAN/\1/' | tr '\n' ' ')
             ok=FAIL; [ "$st" = PASS ] && [ "$drc" = 0 ] && [ -n "$v" ] && ok=PASS
             v="clean: ${v:-none} diff_rc=$drc"
-            printf "%-15s %-4s self-test=%-5s cyc=%-9s %s\n" $k $ok "${st:-NONE}" "${cyc:--}" "$v"; }
+            printf "%-15s %-4s self-test=%-5s cyc=%-9s tb_rc=%-3s %s\n" $k $ok "${st:-NONE}" "${cyc:--}" "$trc" "$v"
+            # a FAIL says WHY in the bench's own words (its FAIL/fatal lines, 3 max, 150 chars) -- no RTL, no traces
+            [ $ok = PASS ] || grep -m3 -E '^(FAIL|%Error|%Fatal|ERROR)|[Aa]ssert|wall-clock|L1RTL' $L | cut -c1-150 | sed "s/^/    $k: /"; }
           export -f one
           for k in ${{ inputs.kernels }}; do echo "$k $d ${{ inputs.maxcyc }}"; done | xargs -P 3 -L1 bash -c 'one $0 $1 $2' | sort > /tmp/tab
           cat /tmp/tab
