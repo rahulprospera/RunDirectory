@@ -75,6 +75,7 @@ jobs:
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd src/rtl
+          set +e    # bash -e killed the step at verilator's rc=2 before the verdict printed (run 44942535201)
           H=""; [ "${{ inputs.hier }}" = 1 ] && H="--hierarchical +define+HPML_SOC_HIER +define+HPML_TB_NOPROBE"
           s=$(date +%s)
           # -j 1: the 2-hart C++ compile is ~6.5 GB per job (boot-replay OOM, run 44225047847)
@@ -86,6 +87,7 @@ jobs:
           echo "build rc=$rc in $(( ($(date +%s)-s)/60 )) min; errors $(grep -c '^%Error' /tmp/build.log)"
           grep '^%Error' /tmp/build.log | sed -E 's/^(%Error[^:]*: [^:]+:[0-9]+).*/\1/' | head -10
           grep -q 'Can.t write' /tmp/build.log && df -h / /mnt | tail -2
+          [ $rc = 0 ] || grep -E '^%(Error|Warning-[A-Z]+:)' /tmp/build.log | grep -v '^%Warning' | cut -c1-160 | head -12
           exit $rc
       - name: Run every kernel, judge every hart
         run: |
