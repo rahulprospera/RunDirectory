@@ -12,7 +12,7 @@ on:
       branch:  { description: 'hp_ml_core branch', default: 'integ-l1-2h' }
       ncore:   { description: 'harts', default: '4' }
       kernels: { description: 'kernels (space separated)', default: 'd1_ipi d1b_clintrd d1c_clinthole d1s_rd d1s_rd2 d2_prodcons d3_lrsc_amo d3a_amo d3b_lrsc d3s_sc1 d4_falseshare d5_shootdown d5b_poll d6_h_shoot d7_clint_xwr q1_ipi_ring q2_amo q3_lrsc' }
-      hier:    { description: '1 = --hierarchical (core compiled once, HPML_SOC_HIER); 0 = flat', default: '1' }
+      hier:    { description: '1 = ONE core build, N instances (--hierarchical, HPML_SOC_HIER + TB_NOPROBE); 0 = flat (N copies, ~N x build)', default: '1' }
       defines: { description: 'extra +define+ / -D flags', default: '' }
       maxcyc:  { description: 'per-kernel cycle cap', default: '2000000' }
 permissions: { contents: read }
@@ -75,7 +75,7 @@ jobs:
         run: |
           export PATH=/opt/verilator/bin:$PATH
           cd src/rtl
-          H=""; [ "${{ inputs.hier }}" = 1 ] && H="--hierarchical +define+HPML_SOC_HIER"
+          H=""; [ "${{ inputs.hier }}" = 1 ] && H="--hierarchical +define+HPML_SOC_HIER +define+HPML_TB_NOPROBE"
           s=$(date +%s)
           # -j 1: the 2-hart C++ compile is ~6.5 GB per job (boot-replay OOM, run 44225047847)
           verilator --binary --timing -Wall -Wno-fatal -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
