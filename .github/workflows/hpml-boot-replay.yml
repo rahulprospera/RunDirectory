@@ -16,6 +16,7 @@ on:
       windows: { description: 'JSON list of window dirs, or all', default: 'all' }
       hext:    { description: 'H extension: 1 = RTL built with rtl_core.json "hext": 1 + co-sim Spike with H (WO-081 windows)', default: '0' }
       ncore:   { description: 'harts: 1 = today; 2 = the dual-core shell (l1-dual) + DUT-driven Spike -p2 co-sim (ci_window_2h.sh, WO-081 C)', default: '1' }
+      plusargs: { description: 'debug: extra sim plusargs for every window (e.g. +ldptrace +l1hktrace); the window keeps tb.log.gz as evidence', default: '' }
       defines: { description: 'extra verilator defines appended to the build, e.g. +define+HPML_SOC_L1 +define+HPML_TB_BOOT (empty = the build is unchanged)', default: '' }
 permissions: { contents: read }
 # Its own group: never queues behind, or cancels, another agent's hpml-core run.
@@ -168,7 +169,7 @@ jobs:
             bash src/test/boot_replay/ci_window_2h.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
               "$PWD/data/image/fw_payload.elf" "${{ inputs.cycles }}" "$PWD/out"
           else
-            bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
+            TB_PLUS="${{ inputs.plusargs }}" bash src/test/boot_replay/ci_window.sh "${{ matrix.w }}" data "$PWD/sim/tb" /opt/spike-hpml/bin/spike \
               "${{ inputs.cycles }}" "$PWD/out"
           fi
       - uses: actions/upload-artifact@v4
