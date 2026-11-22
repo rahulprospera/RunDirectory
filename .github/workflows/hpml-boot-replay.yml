@@ -19,7 +19,7 @@ on:
       defines: { description: 'extra verilator defines appended to the build, e.g. +define+HPML_SOC_L1 +define+HPML_TB_BOOT (empty = the build is unchanged)', default: '' }
 permissions: { contents: read }
 # Its own group: never queues behind, or cancels, another agent's hpml-core run.
-concurrency: { group: 'hpml-boot-replay-n${{ inputs.ncore }}', cancel-in-progress: false }   # 1-hart and 2-hart runs never block each other
+concurrency: { group: 'hpml-boot-replay-n${{ inputs.ncore }}-${{ inputs.branch }}-${{ inputs.defines }}-${{ inputs.windows }}', cancel-in-progress: false }   # 1-hart and 2-hart runs never block each other
 
 env:
   REPO: rahulprospera/hp_ml_core
