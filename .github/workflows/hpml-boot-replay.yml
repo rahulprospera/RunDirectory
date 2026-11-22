@@ -16,6 +16,7 @@ on:
       windows: { description: 'JSON list of window dirs, or all', default: 'all' }
       hext:    { description: 'H extension: 1 = RTL built with rtl_core.json "hext": 1 + co-sim Spike with H (WO-081 windows)', default: '0' }
       ncore:   { description: 'harts: 1 = today; 2 = the dual-core shell (l1-dual) + DUT-driven Spike -p2 co-sim (ci_window_2h.sh, WO-081 C)', default: '1' }
+      defines: { description: 'extra verilator defines appended to the build, e.g. +define+HPML_SOC_L1 +define+HPML_TB_BOOT (empty = the build is unchanged)', default: '' }
 permissions: { contents: read }
 # Its own group: never queues behind, or cancels, another agent's hpml-core run.
 concurrency: { group: 'hpml-boot-replay-n${{ inputs.ncore }}', cancel-in-progress: false }   # 1-hart and 2-hart runs never block each other
@@ -83,7 +84,8 @@ jobs:
             XDEF="--hierarchical +define+HPML_SOC_HIER +define+HPML_TB_NOPROBE +define+HPML_TB_BOOT +define+HPML_NCORE=2"; XDIR="-y top"; VJ=1   # -j 1: the 2-hart C++ compile is ~6.5 GB per job (4-way OOM-killed the runner, run 44225047847); core compiled once (the shell hier mode); WO-103 fixed, so no HPIPE override
           else
             XDEF=""; XDIR=""; VJ=$(nproc)
-            grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT"; exit 1; }
+            case "${{ inputs.defines }}" in *HPML_TB_BOOT*) ;; *)
+              grep -q '^`define HPML_TB_BOOT' tb/tb_m5_program.sv || { echo "branch does not enable HPML_TB_BOOT (or pass +define+HPML_TB_BOOT in defines)"; exit 1; } ;; esac
           fi
           python3 - config/rtl_core.json 2 "${{ inputs.hext }}" <<'PY'
           import json,sys
@@ -94,6 +96,8 @@ jobs:
           python3 flow/gen_rtl_config.py >/dev/null
           echo "hext=${{ inputs.hext }}: $(grep -m1 'define HPML_HEXT ' hpml_cfg.vh)"
           if [ "${{ inputs.hext }}" = "1" ] && ! grep -qE 'define HPML_HEXT +1' hpml_cfg.vh; then echo "::error::hext=1 requested but HPML_HEXT is not 1"; exit 1; fi
+          if [ -n "${{ inputs.defines }}" ]; then XDEF="$XDEF ${{ inputs.defines }}"; XDIR="-y top"; fi   # defines (e.g. HPML_SOC_L1) need rtl/top; empty = the old build exactly
+          echo "defines: $XDEF"
           mkdir -p build/w
           verilator --binary --timing -Wall -Wno-fatal \
             -Werror-WIDTHEXPAND -Werror-WIDTHTRUNC -Werror-PINMISSING \
@@ -190,5 +194,5 @@ jobs:
           n=$(wc -l < all.txt); w=$(grep -c 'WEDGE' all.txt || true)
           if [ "${{ inputs.ncore }}" = "2" ]; then p=$(grep '| h0 MATCH' all.txt | grep '| h1 MATCH' | grep -vc 'WEDGE' || true)
           else p=$(grep '| MATCH' all.txt | grep -vc WEDGE || true); fi
-          { echo "## Boot replay (hext=${{ inputs.hext }}, ncore=${{ inputs.ncore }}): PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## Boot replay (hext=${{ inputs.hext }}, ncore=${{ inputs.ncore }}, defines='${{ inputs.defines }}'): PASS $p / $n  (wedges: $w)"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "PASS $p / $n"; cat all.txt
