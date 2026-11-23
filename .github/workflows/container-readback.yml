@@ -66,12 +66,39 @@ jobs:
           sudo mkdir -p /mnt/obj && sudo chown "$(id -u):$(id -g)" /mnt/obj
           mkdir -p /mnt/obj/sys          # build_sys.sh redirects build.log into $OBJ
           df -h / /mnt | sed 's/^/  df-before /'
+          # SAMPLER. Three runs lost the runner here with NO log: a lost runner runs no later step,
+          # not even an always() one, so the evidence has to stream from INSIDE this step while it
+          # is alive. Every 60 s: memory, swap, disk, the biggest process, and the phase -- cpp =
+          # generated C++ files (verilator convert), obj = compiled objects (C++ compile). The
+          # last line before a loss says which phase died and how close memory was. Numbers and
+          # units only: no paths, no module or SKU names (this log is public).
+          (
+            t=0
+            while sleep 60; do
+              t=$((t+60))
+              m=$(free -m | awk '/^Mem:/{print $7"MB-avail "$3"MB-used"}')
+              sw=$(free -m | awk '/^Swap:/{print $3}')
+              d=$(df -BG --output=avail / | tail -1 | tr -d ' ')
+              top=$(ps -eo rss= --sort=-rss | head -1 | awk '{printf "%d", $1/1024}')
+              cpp=$(ls /mnt/obj/sys 2>/dev/null | grep -c '[.]cpp$')
+              obj=$(ls /mnt/obj/sys 2>/dev/null | grep -c '[.]o$')
+              echo "  sample t=${t}s mem ${m} swap ${sw}MB disk ${d} top-proc ${top}MB cpp ${cpp} obj ${obj}"
+            done
+          ) &
+          SAMPLER=$!
           cd tile
+          # BUILD_JOBS=1 (was 2): the lost-runner class here is compile footprint, and peak RSS
+          # scales with jobs. Core and tile are ONE verilator call in build_sys.sh, so they cannot
+          # be split from this file; the cpp/obj counts above stand in for that split.
+          set +e
           CORE="$GITHUB_WORKSPACE/core" VDEFS="-DHPML_FE_XSTAGE=0" \
-            HARNESS=tb_sys_stages.cpp OBJ=/mnt/obj/sys BUILD_JOBS=2 \
+            HARNESS=tb_sys_stages.cpp OBJ=/mnt/obj/sys BUILD_JOBS=1 \
             VERDICT_DIR="$HOME/ci-detail" \
             bash verif/ci/verdict_only.sh container-build \
               bash scripts/hp_vpu_3_0/build_sys.sh
+          rc=$?
+          kill $SAMPLER 2>/dev/null
+          exit $rc
       - name: Why the build failed (classification only — no paths, no identifiers)
         if: failure()
         run: |
