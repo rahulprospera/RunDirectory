@@ -1,0 +1,81 @@
+name: exec-gate
+# PUBLIC runner-shell: build the private edgemx exec harness for one SKU and run ONE named gate against it.
+# NO RTL, NO source committed here: the private repo is cloned at runtime with RTL_RUN_TOKEN1 (masked; clone
+# errors scrubbed). Nothing built from it is cached or uploaded.
+#
+# DISCLOSURE SURFACE (this log is world-readable). What reaches it, and nothing more:
+#   · runner capability (cores / mem / disk), tool versions
+#   · the gate's verdict line: "PASS: <gate>" or "FAIL: <gate> (<what failed>)", and its CYCLES line
+#   · the footprint step: disk/mem left, whether the executor exists, exit codes
+# The build log (verilator command line = every RTL path and module name) and the gate's detail stay in a
+# runner-local file. Output is filtered through an ALLOWLIST of exact patterns, then a safe character set.
+#   gh workflow run exec-gate.yml --repo rahulprospera/RunDirectory -f branch=<private branch> -f gate=group-scale
+on:
+  workflow_dispatch:
+    inputs:
+      branch: { description: 'private branch to run', required: true }
+      gate:   { description: 'gate name (verif/ci/exec_gate.sh)', default: 'group-scale' }
+      shape:  { description: 'small | wide (mapped inside the gate)', default: 'small' }
+permissions: { contents: read }
+concurrency:
+  group: exec-gate-${{ inputs.gate }}
+  cancel-in-progress: false
+jobs:
+  run:
+    name: ${{ inputs.gate }} @ ${{ inputs.shape }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check the private-repo tunnel is alive
+        run: |
+          set +e
+          git ls-remote "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" HEAD >/dev/null 2>tok_err.txt
+          if [ $? -ne 0 ]; then echo "::error title=RTL_RUN_TOKEN1 is dead::token expired, revoked, or lacks Contents:Read"; exit 1; fi
+          echo "tunnel ok"
+      - name: Cache Verilator (public tool)
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache libgoogle-perftools-dev numactl zlib1g-dev help2man libfl-dev
+          git clone -q https://github.com/verilator/verilator /tmp/v && cd /tmp/v && git checkout -q v5.048
+          autoconf && ./configure --prefix=/opt/verilator >/dev/null && make -j2 >/dev/null && sudo make install >/dev/null
+      - name: Runtime packages (public tools)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgoogle-perftools-dev zlib1g-dev ccache python3 >/dev/null
+          echo "cores=$(nproc) mem=$(free -g | awk '/^Mem:/{print $2}')GB disk=$(df -BG --output=avail / | tail -1 | tr -d ' ')"
+      - name: Checkout PRIVATE repo (token masked; source never leaves the runner)
+        env: { BRANCH: '${{ inputs.branch }}' }
+        run: |
+          set +e
+          git clone -q --depth 1 --branch "$BRANCH" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN1 }}@github.com/rahulprospera/hp_vpu_ml_accelerator.git" src 2>clone_err.txt
+          [ $? -eq 0 ] && echo "private checkout ok" || { echo "checkout FAILED (branch or token)"; exit 1; }
+      - name: Gate (ALL output captured to a file, NONE echoed)
+        env: { GATE: '${{ inputs.gate }}', SHAPE: '${{ inputs.shape }}' }
+        run: |
+          export PATH=/opt/verilator/bin:$PATH BUILD_JOBS=2
+          cd src
+          set +e
+          case "$GATE$SHAPE" in *[!a-z0-9-]*|"") echo "FAIL: input (bad gate or shape name)" > /tmp/gate.out; echo 2 > /tmp/gate.rc; exit 0;; esac
+          bash verif/ci/exec_gate.sh "$GATE" > /tmp/gate.out 2>/tmp/gate.err
+          echo "$?" > /tmp/gate.rc
+      - name: Verdict (ALLOWLIST ONLY; nothing else reaches this public log)
+        if: always()
+        run: |
+          set +e
+          grep -E '^(PASS|FAIL): [a-z0-9-]+( \([A-Za-z0-9 /:=.,+%-]*\))?$|^CYCLES: [a-z0-9-]+ [A-Za-z0-9 =.+%-]*$' /tmp/gate.out \
+            | tr -cd 'A-Za-z0-9_/=.:|()+%, \n-' | head -20
+          grep -qE '^(PASS|FAIL): ' /tmp/gate.out 2>/dev/null || echo "FAIL: no verdict line (runner or checkout)"
+          echo "exit=$(cat /tmp/gate.rc 2>/dev/null || echo missing)"
+          grep -qx 0 /tmp/gate.rc
+      - name: Footprint (always, so a lost runner leaves evidence)
+        if: always()
+        run: |
+          echo "disk_left=$(df -BG --output=avail / | tail -1 | tr -d ' ') mem_avail=$(free -m | awk '/^Mem:/{print $7}')MB"
+          [ -e "$RUNNER_TEMP/executor.ok" ] && echo "executor=built" || echo "executor=absent"
+          echo "gate_rc=$(cat /tmp/gate.rc 2>/dev/null || echo missing)"
