@@ -125,13 +125,15 @@ jobs:
             st=$(grep -oE 'self-test [A-Z]+' $L | head -1 | cut -d' ' -f2); cyc=$(grep -m1 -E '^  cycles ' $L | awk '{print $2}')
             python3 flow/diff_2h.py $k --dir $2 > /tmp/d_$k.txt 2>&1; drc=$?
             v=$(grep -oE '\[[a-z0-9_]+ h[0-9]+\] CLEAN' /tmp/d_$k.txt | sed -E 's/\[[a-z0-9_]+ (h[0-9]+)\] CLEAN/\1/' | tr '\n' ' ')
-            ok=FAIL; [ "$st" = PASS ] && [ "$drc" = 0 ] && [ -n "$v" ] && ok=PASS
+            cf=$(grep -cE 'COH-FAIL|COHINV-FAIL' $L)   # WO-172: the manager's checks and §COH_INV are part of the verdict
+            ci=$(grep -oE 'SWMR [0-9]+ PHANTOM [0-9]+ STALE [0-9]+' $L | head -1 | sed -E 's/([A-Z]+) ([0-9]+)/\1=\2/g')
+            ok=FAIL; [ "$st" = PASS ] && [ "$drc" = 0 ] && [ -n "$v" ] && [ "$cf" = 0 ] && ok=PASS
             [ $trc = 124 ] && ok=TIMEOUT   # WO-171: wall-clock kill, NOT a cycle verdict
-            v="clean: ${v:-none} diff_rc=$drc"
+            v="clean: ${v:-none} diff_rc=$drc coh_fail=$cf ${ci:-cohinv=none}"
             printf "%-15s %-4s self-test=%-5s cyc=%-9s tb_rc=%-3s %s\n" $k $ok "${st:-NONE}" "${cyc:--}" "$trc" "$v"
             # a FAIL says WHY in the bench's own words (its FAIL/fatal lines, 3 max, 150 chars) -- no RTL, no traces
             [ $ok = TIMEOUT ] && echo "    $k: WALL-CLOCK TIMEOUT (${{ inputs.wall }} s, killed by timeout; not a hang verdict -- rerun with par=1 or a larger wall)"
-            [ $ok = PASS ] || [ $ok = TIMEOUT ] || grep -m3 -E '^(FAIL|%Error|%Fatal|ERROR)|[Aa]ssert|wall-clock|L1RTL' $L | cut -c1-150 | sed "s/^/    $k: /"; }
+            [ $ok = PASS ] || [ $ok = TIMEOUT ] || grep -m3 -E '^(FAIL|%Error|%Fatal|ERROR)|[Aa]ssert|wall-clock|L1RTL|^COH_INV |COH_[A-Z0-9]+_CK' $L | cut -c1-150 | sed "s/^/    $k: /"; }
           export -f one
           for k in ${{ inputs.kernels }}; do echo "$k $d ${{ inputs.maxcyc }}"; done | xargs -P ${{ inputs.par }} -L1 bash -c 'one $0 $1 $2' | sort > /tmp/tab
           cat /tmp/tab
@@ -143,7 +145,7 @@ jobs:
         run: |
           mkdir -p /tmp/klogs; for f in /tmp/run_*.log /tmp/d_*.txt; do [ -f "$f" ] && gzip -c "$f" > /tmp/klogs/$(basename $f).gz; done
           # the end-of-run reports (hook / manager balances) of every kernel, in the step log
-          for f in /tmp/run_*.log; do [ -f "$f" ] || continue; echo "== $(basename $f)"; grep -E '^\s*\[(L1HOOK|HK_|COH|L1 )|cycles ' "$f" | cut -c1-200 | head -40; done
+          for f in /tmp/run_*.log; do [ -f "$f" ] || continue; echo "== $(basename $f)"; grep -E '^\s*\[(L1HOOK|HK_|COH|L1 )|^COH_INV |cycles ' "$f" | cut -c1-200 | head -40; done
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: kernel-logs, path: /tmp/klogs, retention-days: 7 }
