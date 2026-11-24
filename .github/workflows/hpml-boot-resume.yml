@@ -43,6 +43,7 @@ jobs:
             SEG_EXTRA="+conlog=$PWD/conlog/con.txt $(cat boot_extra.txt 2>/dev/null)" \
               bash test/boot_replay/ci_segment.sh $k $PWD/bin/tb $PWD/data $PWD/run/seg$k 0 $NCYC $MAXCYC $R > seg$k.out 2>&1
             st=$(cat run/seg$k/status 2>/dev/null || echo "NO STATUS"); echo "segment $k: $st"; grep -E '^\[ci_segment.*segment' seg$k.out | tail -1 | sed 's#/home/[^ ]*##g'
+            for f in run/seg$k/retire*.gz; do [ -f "$f" ] && echo "  md5 $(basename $f .gz) $(zcat $f | grep -v '^#' | md5sum | cut -c1-32) lines $(zcat $f | grep -vc '^#')"; done   # byte-identical check vs node2 (hash only, no trace)
             mkdir -p retire/seg$k; cp run/seg$k/retire*.gz retire/seg$k/ 2>/dev/null; cp run/seg$k/seg.log retire/seg$k/ 2>/dev/null
             echo "seg$k $st" >> state.txt
             [ "$st" = SAVED ] && { cp run/seg$k/save.sav.gz save/latest.sav.gz; echo seg$k > save/SEG; }
