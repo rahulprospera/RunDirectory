@@ -16,6 +16,8 @@ on:
       defines: { description: 'extra +define+ / -D flags', default: '' }
       maxcyc:  { description: 'per-kernel cycle cap', default: '2000000' }
       plusargs: { description: 'debug: extra sim plusargs for every 2h-suite kernel (e.g. +l1hktrace +cohtr); every kernel log is kept as an artifact', default: '' }
+      par:     { description: 'kernels run side by side (xargs -P); use 1 for long 4-hart lock kernels (WO-171)', default: '3' }
+      wall:    { description: 'per-kernel wall-clock limit, seconds; a kill prints TIMEOUT, never FAIL (WO-171)', default: '2400' }
       suite:   { description: '2h = N-hart d/q kernels (build_2h); 1h = the 1-hart t-kernel ladder + cm1 (build_kern, diff_retire) -- the integ-l1 1-hart milestone set', default: '2h' }
 permissions: { contents: read }
 concurrency: { group: 'hpml-quad-${{ inputs.branch }}-n${{ inputs.ncore }}-${{ inputs.hier }}-${{ inputs.defines }}', cancel-in-progress: false }
@@ -119,17 +121,19 @@ jobs:
           fi
           d=dual; [ "${{ inputs.ncore }}" != 2 ] && d=quad
           one(){ k=$1; L=/tmp/run_$k.log
-            timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 ${{ inputs.plusargs }} > $L 2>&1; trc=$?
+            timeout ${{ inputs.wall }} /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 ${{ inputs.plusargs }} > $L 2>&1; trc=$?
             st=$(grep -oE 'self-test [A-Z]+' $L | head -1 | cut -d' ' -f2); cyc=$(grep -m1 -E '^  cycles ' $L | awk '{print $2}')
             python3 flow/diff_2h.py $k --dir $2 > /tmp/d_$k.txt 2>&1; drc=$?
             v=$(grep -oE '\[[a-z0-9_]+ h[0-9]+\] CLEAN' /tmp/d_$k.txt | sed -E 's/\[[a-z0-9_]+ (h[0-9]+)\] CLEAN/\1/' | tr '\n' ' ')
             ok=FAIL; [ "$st" = PASS ] && [ "$drc" = 0 ] && [ -n "$v" ] && ok=PASS
+            [ $trc = 124 ] && ok=TIMEOUT   # WO-171: wall-clock kill, NOT a cycle verdict
             v="clean: ${v:-none} diff_rc=$drc"
             printf "%-15s %-4s self-test=%-5s cyc=%-9s tb_rc=%-3s %s\n" $k $ok "${st:-NONE}" "${cyc:--}" "$trc" "$v"
             # a FAIL says WHY in the bench's own words (its FAIL/fatal lines, 3 max, 150 chars) -- no RTL, no traces
-            [ $ok = PASS ] || grep -m3 -E '^(FAIL|%Error|%Fatal|ERROR)|[Aa]ssert|wall-clock|L1RTL' $L | cut -c1-150 | sed "s/^/    $k: /"; }
+            [ $ok = TIMEOUT ] && echo "    $k: WALL-CLOCK TIMEOUT (${{ inputs.wall }} s, killed by timeout; not a hang verdict -- rerun with par=1 or a larger wall)"
+            [ $ok = PASS ] || [ $ok = TIMEOUT ] || grep -m3 -E '^(FAIL|%Error|%Fatal|ERROR)|[Aa]ssert|wall-clock|L1RTL' $L | cut -c1-150 | sed "s/^/    $k: /"; }
           export -f one
-          for k in ${{ inputs.kernels }}; do echo "$k $d ${{ inputs.maxcyc }}"; done | xargs -P 3 -L1 bash -c 'one $0 $1 $2' | sort > /tmp/tab
+          for k in ${{ inputs.kernels }}; do echo "$k $d ${{ inputs.maxcyc }}"; done | xargs -P ${{ inputs.par }} -L1 bash -c 'one $0 $1 $2' | sort > /tmp/tab
           cat /tmp/tab
           p=$(grep -c ' PASS ' /tmp/tab); n=$(echo ${{ inputs.kernels }} | wc -w)
           { echo "## NCORE=${{ inputs.ncore }} on ${{ inputs.branch }}: PASS $p / $n"; echo '```'; cat /tmp/tab; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
