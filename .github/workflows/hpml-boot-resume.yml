@@ -1,0 +1,53 @@
+name: hpml-boot-resume
+# PUBLIC runner-shell.  NO RTL, NO DATA, NO ARTIFACTS HERE: everything moves by git to/from the PRIVATE
+# rahulprospera/hp_boot_chains (token RTL_BOOT_PUSH_TOKEN = Contents r/w on that repo ONLY; hp_ml_core is never touched).
+#
+# Continues a boot chain that started on node2: branch chain-<N>h of hp_boot_chains holds ONE commit with the FROZEN
+# savable binary (bin/tb + bin/tb.md5 -- a save only restores into the exact binary that wrote it), the reset image,
+# the newest saved segment (save/latest.sav.gz + save/SEG) and the chain state.  Each job runs <segments> segments of
+# <seg_cycles> from that save (test/boot_replay/ci_segment.sh, the same script node2 runs) and after EVERY saved
+# segment amends + force-pushes that one commit (new save, state, per-segment retire + console), so the chain can
+# move back to node2 at any segment boundary.  Dispatch only.  Logs print status lines only (no console, no trace).
+on:
+  workflow_dispatch:
+    inputs:
+      chain:      { description: 'chain-2h or chain-4h (branch of hp_boot_chains)', default: 'chain-2h' }
+      segments:   { description: 'segments to run in this job', default: '1' }
+      seg_cycles: { description: 'cycles per segment', default: '2000000' }
+      maxcyc:     { description: 'hard cycle bound of the whole boot', default: '2000000000' }
+      push:       { description: 'push results back (false = dry run, e.g. the byte-identical check)', default: 'true' }
+permissions: { contents: read }
+concurrency: { group: 'hpml-boot-resume-${{ inputs.chain }}', cancel-in-progress: false }
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Clone the chain branch (private hp_boot_chains)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.chain }}" \
+            "https://x-access-token:${{ secrets.RTL_BOOT_PUSH_TOKEN }}@github.com/rahulprospera/hp_boot_chains.git" c 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+      - name: Check the frozen binary
+        run: |
+          cd c; [ "$(md5sum bin/tb | cut -c1-32)" = "$(cat bin/tb.md5)" ] || { echo "FROZEN BINARY md5 mismatch"; exit 1; }
+          chmod +x bin/tb test/boot_replay/*.sh; echo "tb $(cut -c1-8 bin/tb.md5) last saved: $(cat save/SEG 2>/dev/null || echo none)"
+      - name: Run segments, push after each
+        env: { NSEG: '${{ inputs.segments }}', NCYC: '${{ inputs.seg_cycles }}', MAXCYC: '${{ inputs.maxcyc }}', PUSH: '${{ inputs.push }}', BR: '${{ inputs.chain }}' }
+        run: |
+          cd c; mkdir -p rtl/tb/progs/build/boot data retire conlog
+          git config user.name boot-ci; git config user.email boot-ci@localhost
+          for i in $(seq 1 $NSEG); do
+            if [ -f save/SEG ]; then k=$(( $(sed 's/seg//' save/SEG) + 1 )); R=save/latest.sav.gz; else k=0; R=""; fi
+            SEG_EXTRA="+conlog=$PWD/conlog/con.txt $(cat boot_extra.txt 2>/dev/null)" \
+              bash test/boot_replay/ci_segment.sh $k $PWD/bin/tb $PWD/data $PWD/run/seg$k 0 $NCYC $MAXCYC $R > seg$k.out 2>&1
+            st=$(cat run/seg$k/status 2>/dev/null || echo "NO STATUS"); echo "segment $k: $st"; grep -E '^\[ci_segment.*segment' seg$k.out | tail -1 | sed 's#/home/[^ ]*##g'
+            mkdir -p retire/seg$k; cp run/seg$k/retire*.gz retire/seg$k/ 2>/dev/null; cp run/seg$k/seg.log retire/seg$k/ 2>/dev/null
+            echo "seg$k $st" >> state.txt
+            [ "$st" = SAVED ] && { cp run/seg$k/save.sav.gz save/latest.sav.gz; echo seg$k > save/SEG; }
+            if [ "$PUSH" = true ]; then git add -A save state.txt retire conlog; git commit -q --amend -m "$BR seg$k $st (ci $GITHUB_RUN_ID)"
+              git push -q -f origin HEAD:$BR 2>&1 | sed -E 's#(https://)[^@]*@#\1***@#g'; fi
+            rm -rf run/seg$k
+            [ "$st" = SAVED ] || break
+          done
