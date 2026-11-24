@@ -15,6 +15,7 @@ on:
       hier:    { description: '1 = ONE core build, N instances (--hierarchical, HPML_SOC_HIER + TB_NOPROBE); 0 = flat (N copies, ~N x build)', default: '1' }
       defines: { description: 'extra +define+ / -D flags', default: '' }
       maxcyc:  { description: 'per-kernel cycle cap', default: '2000000' }
+      plusargs: { description: 'debug: extra sim plusargs for every 2h-suite kernel (e.g. +l1hktrace +cohtr); every kernel log is kept as an artifact', default: '' }
       suite:   { description: '2h = N-hart d/q kernels (build_2h); 1h = the 1-hart t-kernel ladder + cm1 (build_kern, diff_retire) -- the integ-l1 1-hart milestone set', default: '2h' }
 permissions: { contents: read }
 concurrency: { group: 'hpml-quad-${{ inputs.branch }}-n${{ inputs.ncore }}-${{ inputs.hier }}-${{ inputs.defines }}', cancel-in-progress: false }
@@ -118,7 +119,7 @@ jobs:
           fi
           d=dual; [ "${{ inputs.ncore }}" != 2 ] && d=quad
           one(){ k=$1; L=/tmp/run_$k.log
-            timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 > $L 2>&1; trc=$?
+            timeout 2400 /mnt/rtlbuild/q/tb +name=$2/$k +maxcyc=$3 ${{ inputs.plusargs }} > $L 2>&1; trc=$?
             st=$(grep -oE 'self-test [A-Z]+' $L | head -1 | cut -d' ' -f2); cyc=$(grep -m1 -E '^  cycles ' $L | awk '{print $2}')
             python3 flow/diff_2h.py $k --dir $2 > /tmp/d_$k.txt 2>&1; drc=$?
             v=$(grep -oE '\[[a-z0-9_]+ h[0-9]+\] CLEAN' /tmp/d_$k.txt | sed -E 's/\[[a-z0-9_]+ (h[0-9]+)\] CLEAN/\1/' | tr '\n' ' ')
@@ -133,3 +134,12 @@ jobs:
           p=$(grep -c ' PASS ' /tmp/tab); n=$(echo ${{ inputs.kernels }} | wc -w)
           { echo "## NCORE=${{ inputs.ncore }} on ${{ inputs.branch }}: PASS $p / $n"; echo '```'; cat /tmp/tab; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "RUNS $n / PASS $p"; [ "$p" = "$n" ]
+      - name: Keep every kernel log (debug)
+        if: always()
+        run: |
+          mkdir -p /tmp/klogs; for f in /tmp/run_*.log /tmp/d_*.txt; do [ -f "$f" ] && gzip -c "$f" > /tmp/klogs/$(basename $f).gz; done
+          # the end-of-run reports (hook / manager balances) of every kernel, in the step log
+          for f in /tmp/run_*.log; do [ -f "$f" ] || continue; echo "== $(basename $f)"; grep -E '^\s*\[(L1HOOK|HK_|COH|L1 )|cycles ' "$f" | cut -c1-200 | head -40; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: kernel-logs, path: /tmp/klogs, retention-days: 7 }
