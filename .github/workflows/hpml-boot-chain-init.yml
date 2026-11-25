@@ -1,0 +1,92 @@
+name: hpml-boot-chain-init
+# PUBLIC runner-shell.  NO RTL, NO DATA, NO ARTIFACTS HERE.  Clones the PRIVATE hp_ml_core (read token) and writes ONE
+# branch of the PRIVATE hp_boot_chains (RTL_BOOT_PUSH_TOKEN).
+#
+# STARTS a multi-hart boot chain in CI (no node2 / no Mac): builds the FROZEN savable hier binary
+# (test/boot_replay/build_hier_savable.sh, NCORE harts) from <branch> [+ a local merge of <merge>, never pushed],
+# and force-pushes branch <chain> of hp_boot_chains with the layout hpml-boot-resume expects:
+#   bin/tb + bin/tb.md5, data/reset/restore.hex.gz (copied from <image_from>), test/boot_replay/{ci_segment,boot_chain}.sh
+#   (from the code tree), boot_extra.txt, state.txt, SRC.txt (code shas).  No save: the first resume starts at reset.
+# Then dispatch hpml-boot-resume with chain=<chain>.  Refuses to overwrite chain-2h / chain-4h (the boot agent's chains).
+on:
+  workflow_dispatch:
+    inputs:
+      branch:     { description: 'hp_ml_core code branch', default: 'coh-4h-fixes' }
+      merge:      { description: 'optional 2nd hp_ml_core branch merged LOCALLY before the build (empty = none)', default: '' }
+      ncore:      { description: 'harts', default: '4' }
+      chain:      { description: 'hp_boot_chains branch to create (not chain-2h / chain-4h)', default: 'chain-4h-mac' }
+      image_from: { description: 'hp_boot_chains branch whose data/reset/restore.hex.gz is the reset image', default: 'chain-4h' }
+      boot_extra: { description: 'plusargs for every segment', default: '+us_mark=BB:_userspace_up' }
+      threads:    { description: 'verilator --threads for the sim', default: '4' }
+permissions: { contents: read }
+concurrency: { group: 'hpml-boot-chain-init-${{ inputs.chain }}', cancel-in-progress: false }
+env:
+  REPO: rahulprospera/hp_ml_core
+jobs:
+  init:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - name: Guard
+        run: |
+          case "${{ inputs.chain }}" in chain-2h|chain-4h) echo "refusing: ${{ inputs.chain }} belongs to the boot agent"; exit 1;; chain-*) ;; *) echo "chain must start with chain-"; exit 1;; esac
+      - name: Restore Verilator
+        id: vc
+        uses: actions/cache@v4
+        with: { path: /opt/verilator, key: verilator-v5.048-u2404 }
+      - name: Deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git perl python3 make autoconf g++ flex bison ccache help2man libfl-dev zlib1g-dev
+      - name: Build Verilator (miss only)
+        if: steps.vc.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/verilator/verilator /tmp/v && cd /tmp/v
+          git checkout v5.048 || git checkout stable
+          autoconf && ./configure --prefix=/opt/verilator && make -j"$(nproc)" && sudo make install
+      - name: Free disk, add swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup || true
+          sudo mkdir -p /mnt/rtlbuild && sudo chown -R "$(id -u):$(id -g)" /mnt/rtlbuild
+          sudo fallocate -l 16G /mnt/swapq && sudo chmod 600 /mnt/swapq && sudo mkswap /mnt/swapq >/dev/null && sudo swapon /mnt/swapq || true
+      - name: Checkout PRIVATE code (+ local merge)
+        run: |
+          set +e
+          git clone --branch "${{ inputs.branch }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" src 2>e.txt
+          [ $? -eq 0 ] || { echo "checkout FAILED:"; sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          cd src; git config user.name boot-ci; git config user.email boot-ci@localhost
+          echo "code ${{ inputs.branch }} $(git rev-parse HEAD)" | tee ../SRC.txt
+          if [ -n "${{ inputs.merge }}" ]; then
+            git fetch -q origin "${{ inputs.merge }}" 2>e.txt || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+            git merge -q --no-edit FETCH_HEAD || { echo "MERGE CONFLICT with ${{ inputs.merge }}"; git diff --name-only --diff-filter=U; exit 1; }
+            echo "merge ${{ inputs.merge }} $(git rev-parse FETCH_HEAD) -> local $(git rev-parse HEAD) (not pushed)" | tee -a ../SRC.txt
+          fi
+      - name: Build the frozen savable hier binary (NCORE=${{ inputs.ncore }})
+        run: |
+          export PATH=/opt/verilator/bin:$PATH
+          cd src; s=$(date +%s)
+          bash test/boot_replay/build_hier_savable.sh rtl /mnt/rtlbuild/obj ${{ inputs.ncore }} --threads ${{ inputs.threads }} > /mnt/rtlbuild/build.log 2>&1
+          rc=$?; echo "build rc=$rc in $(( $(date +%s) - s ))s"
+          [ $rc = 0 ] || { grep -m5 '%Error' /mnt/rtlbuild/build.log; tail -5 /mnt/rtlbuild/build.log; exit 1; }
+      - name: Assemble + push the chain branch (private hp_boot_chains)
+        run: |
+          set +e
+          git clone --depth 1 --branch "${{ inputs.image_from }}" \
+            "https://x-access-token:${{ secrets.RTL_BOOT_PUSH_TOKEN }}@github.com/rahulprospera/hp_boot_chains.git" img 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          set -e
+          mkdir c && cd c && git init -q && git checkout -q -b "${{ inputs.chain }}"
+          git config user.name boot-ci; git config user.email boot-ci@localhost
+          mkdir -p bin data/reset test/boot_replay conlog
+          cp /mnt/rtlbuild/obj/tb bin/tb; md5sum bin/tb | cut -c1-32 > bin/tb.md5
+          cp ../img/data/reset/restore.hex.gz data/reset/
+          cp ../src/test/boot_replay/ci_segment.sh ../src/test/boot_replay/boot_chain.sh test/boot_replay/
+          echo "${{ inputs.boot_extra }}" > boot_extra.txt; : > state.txt; : > conlog/con.txt
+          cp ../SRC.txt SRC.txt; echo "ncore ${{ inputs.ncore }} threads ${{ inputs.threads }} image ${{ inputs.image_from }} $(zcat data/reset/restore.hex.gz | md5sum | cut -c1-32)" >> SRC.txt
+          cat SRC.txt; echo "tb $(cat bin/tb.md5)"
+          git add -A; git commit -q -m "${{ inputs.chain }} init (ci $GITHUB_RUN_ID): $(head -1 SRC.txt | cut -c1-80)"
+          git remote add origin "https://x-access-token:${{ secrets.RTL_BOOT_PUSH_TOKEN }}@github.com/rahulprospera/hp_boot_chains.git"
+          git push -q -f origin HEAD:"${{ inputs.chain }}" 2>&1 | sed -E 's#(https://)[^@]*@#\1***@#g'
+          echo "pushed ${{ inputs.chain }} -- next: dispatch hpml-boot-resume chain=${{ inputs.chain }}"
