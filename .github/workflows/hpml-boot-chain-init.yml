@@ -6,7 +6,7 @@ name: hpml-boot-chain-init
 # (test/boot_replay/build_hier_savable.sh, NCORE harts) from <branch> [+ a local merge of <merge>, never pushed],
 # and force-pushes branch <chain> of hp_boot_chains with the layout hpml-boot-resume expects:
 #   bin/tb + bin/tb.md5, data/reset/restore.hex.gz (copied from <image_from>), test/boot_replay/{ci_segment,boot_chain}.sh
-#   (from the code tree), boot_extra.txt, state.txt, SRC.txt (code shas).  No save: the first resume starts at reset.
+#   (from the code tree), boot_extra.txt, state.txt, SRC.txt (code shas), save/.keep.  No save: the first resume starts at reset.
 # Then dispatch hpml-boot-resume with chain=<chain>.  Refuses to overwrite chain-2h / chain-4h (the boot agent's chains).
 on:
   workflow_dispatch:
@@ -79,7 +79,7 @@ jobs:
           set -e
           mkdir c && cd c && git init -q && git checkout -q -b "${{ inputs.chain }}"
           git config user.name boot-ci; git config user.email boot-ci@localhost
-          mkdir -p bin data/reset test/boot_replay conlog
+          mkdir -p bin data/reset test/boot_replay conlog save; : > save/.keep   # resume cp's save/latest.sav.gz -- git drops empty dirs
           cp /mnt/rtlbuild/obj/tb bin/tb; md5sum bin/tb | cut -c1-32 > bin/tb.md5
           cp ../img/data/reset/restore.hex.gz data/reset/
           cp ../src/test/boot_replay/ci_segment.sh ../src/test/boot_replay/boot_chain.sh test/boot_replay/
