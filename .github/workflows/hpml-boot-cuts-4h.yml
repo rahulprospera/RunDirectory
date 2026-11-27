@@ -44,7 +44,7 @@ jobs:
       matrix: { w: '${{ fromJson(needs.plan.outputs.windows) }}' }
     steps:
       - name: Deps
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf python3
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft*; sudo apt-get update -qq || true; sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf python3
       - name: Clone binary, tools, cut (private, sparse)
         run: |
           set +e
@@ -55,7 +55,7 @@ jobs:
           [ "$(md5sum c/bin/tb | cut -c1-32)" = "$(cat c/bin/tb.md5)" ] || { echo "FROZEN BINARY md5 mismatch"; exit 1; }
           chmod +x c/bin/tb
           cl ${{ env.REPO }} "${{ inputs.tools }}" "${{ secrets.RTL_RUN_TOKEN_MLCORE }}" src
-          (cd src && git sparse-checkout set test/boot_replay -q && echo "tools $(git rev-parse --short HEAD)")
+          (cd src && git sparse-checkout set test/boot_replay && echo "tools $(git rev-parse --short HEAD)")
           cl ${{ env.REPO }} "${{ inputs.data }}" "${{ secrets.RTL_RUN_TOKEN_MLCORE }}" data
           (cd data && git sparse-checkout set "windows/${{ matrix.w }}" reset)
           echo "tb $(cut -c1-8 c/bin/tb.md5)  $(git -C c log -1 --format=%s | cut -c1-80)"
