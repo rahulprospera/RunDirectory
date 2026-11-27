@@ -1,0 +1,81 @@
+name: hpml-boot-cuts-4h
+# PUBLIC runner-shell.  NO RTL, NO DATA, NO BINARIES HERE.  Uploads only the per-cut verdict text.
+#
+# The 4-HART boot cuts in PARALLEL: does a tree run through every cut of boot-replay/win500k-bb-4h (25 cuts, 5M hart-0
+# instructions apart, reset .. busybox prompt)?  One matrix job per cut runs <cycles> RTL cycles from that cut's checkpoint
+# (test/boot_replay/ci_window_4h.sh) and reports FINISH / FAIL, cyc/s and per-hart retires.  No Spike co-sim.
+#   binary: bin/tb of the PRIVATE hp_boot_chains branch <tb_from> -- the frozen savable hier NCORE=4 build that
+#           hpml-boot-chain-init makes from any hp_ml_core branch / tag (so a tag is built ONCE, then reused here).
+#   tools:  test/boot_replay of hp_ml_core branch <tools> (gen_restore.py with 4 harts, ci_window_4h.sh).
+#   data:   hp_ml_core branch <data> (windows/<ckpt>/{state.txt,mem.bin.gz}, reset/restore.hex.gz).
+on:
+  workflow_dispatch:
+    inputs:
+      tb_from: { description: 'hp_boot_chains branch holding bin/tb (made by hpml-boot-chain-init)', default: 'chain-4h-mac' }
+      tools:   { description: 'hp_ml_core branch with test/boot_replay/ci_window_4h.sh', default: 'coh-4h-fixes' }
+      data:    { description: 'hp_ml_core data branch (the 4h cuts)', default: 'boot-replay/win500k-bb-4h' }
+      cycles:  { description: 'RTL cycles per cut', default: '2000000' }
+      windows: { description: 'JSON list of cut dirs, or all', default: 'all' }
+permissions: { contents: read }
+concurrency: { group: 'hpml-boot-cuts-4h-${{ inputs.tb_from }}-${{ inputs.windows }}', cancel-in-progress: false }
+env:
+  REPO: rahulprospera/hp_ml_core
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs: { windows: '${{ steps.p.outputs.windows }}' }
+    steps:
+      - id: p
+        run: |
+          if [ '${{ inputs.windows }}' != all ]; then echo 'windows=${{ inputs.windows }}' >> "$GITHUB_OUTPUT"; exit 0; fi
+          set +e
+          git clone -q --depth 1 --filter=blob:none --sparse --branch "${{ inputs.data }}" \
+            "https://x-access-token:${{ secrets.RTL_RUN_TOKEN_MLCORE }}@github.com/${{ env.REPO }}.git" data 2>e.txt
+          [ $? -eq 0 ] || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }
+          w=$(grep -v '^\s*$' data/windows.txt | python3 -c 'import sys,json;print(json.dumps([l.strip() for l in sys.stdin]))')
+          echo "windows=$w" >> "$GITHUB_OUTPUT"; echo "$w"
+  cut:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: { w: '${{ fromJson(needs.plan.outputs.windows) }}' }
+    steps:
+      - name: Deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf python3
+      - name: Clone binary, tools, cut (private, sparse)
+        run: |
+          set +e
+          cl() { git clone -q --depth 1 --filter=blob:none --sparse --branch "$2" "https://x-access-token:$3@github.com/$1.git" "$4" 2>e.txt \
+                 || { sed -E 's#(https://)[^@]*@#\1***@#g' e.txt; exit 1; }; }
+          cl rahulprospera/hp_boot_chains "${{ inputs.tb_from }}" "${{ secrets.RTL_BOOT_PUSH_TOKEN }}" c
+          (cd c && git sparse-checkout set bin)
+          [ "$(md5sum c/bin/tb | cut -c1-32)" = "$(cat c/bin/tb.md5)" ] || { echo "FROZEN BINARY md5 mismatch"; exit 1; }
+          chmod +x c/bin/tb
+          cl ${{ env.REPO }} "${{ inputs.tools }}" "${{ secrets.RTL_RUN_TOKEN_MLCORE }}" src
+          (cd src && git sparse-checkout set test/boot_replay -q && echo "tools $(git rev-parse --short HEAD)")
+          cl ${{ env.REPO }} "${{ inputs.data }}" "${{ secrets.RTL_RUN_TOKEN_MLCORE }}" data
+          (cd data && git sparse-checkout set "windows/${{ matrix.w }}" reset)
+          echo "tb $(cut -c1-8 c/bin/tb.md5)  $(git -C c log -1 --format=%s | cut -c1-80)"
+      - name: Run ${{ matrix.w }}
+        run: |
+          bash src/test/boot_replay/ci_window_4h.sh "${{ matrix.w }}" "$PWD/data" "$PWD/c/bin/tb" "${{ inputs.cycles }}" "$PWD/out" \
+            | sed 's#/home/[^ ]*##g'
+          mkdir -p v; cp out/summary.txt "v/${{ matrix.w }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'verdict-${{ matrix.w }}', path: v/, if-no-files-found: ignore, retention-days: 14 }
+  collect:
+    needs: cut
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'verdict-*', merge-multiple: true, path: v }
+      - run: |
+          cat v/*.txt 2>/dev/null | sort -t_ -k2 -n > all.txt; n=$(wc -l < all.txt); p=$(grep -c '| FINISH |' all.txt || true)
+          { echo "## 4h cuts (tb_from=${{ inputs.tb_from }}, cycles=${{ inputs.cycles }}): FINISH $p / $n"; echo '```'; cat all.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "FINISH $p / $n"; cat all.txt
