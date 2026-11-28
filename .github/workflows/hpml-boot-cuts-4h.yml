@@ -16,6 +16,7 @@ on:
       data:    { description: 'hp_ml_core data branch (the 4h cuts)', default: 'boot-replay/win500k-bb-4h' }
       cycles:  { description: 'RTL cycles per cut', default: '2000000' }
       windows: { description: 'JSON list of cut dirs, or all', default: 'all' }
+      par:     { description: 'max cuts at once (leave CI slots for the other agents)', default: '12' }
 permissions: { contents: read }
 concurrency: { group: 'hpml-boot-cuts-4h-${{ inputs.tb_from }}-${{ inputs.windows }}', cancel-in-progress: false }
 env:
@@ -41,6 +42,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJson(inputs.par) }}
       matrix: { w: '${{ fromJson(needs.plan.outputs.windows) }}' }
     steps:
       - name: Deps
